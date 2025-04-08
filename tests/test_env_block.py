@@ -127,3 +127,37 @@ async def test_subclass_with_explicit_prefix():
 
     block = await ConfiguredPrefix.from_env()
     assert block.token == "expected"
+
+
+async def test_successful_casting_of_standard_type():
+    reset_env_and_instance(DownstreamAPI)
+    os.environ["DOWNSTREAMAPI_TOKEN"] = "abc"
+    os.environ["DOWNSTREAMAPI_URL"] = "https://x.com"
+    os.environ["DOWNSTREAMAPI_SECRET"] = "shh"
+    os.environ["DOWNSTREAMAPI_RETRIES"] = "7"
+
+    block = await DownstreamAPI.from_env()
+    assert block.retries == 7
+    assert isinstance(block.retries, int)
+
+
+async def test_unsuccessful_casting_raises_value_error():
+    reset_env_and_instance(DownstreamAPI)
+    os.environ["DOWNSTREAMAPI_TOKEN"] = "abc"
+    os.environ["DOWNSTREAMAPI_URL"] = "https://x.com"
+    os.environ["DOWNSTREAMAPI_SECRET"] = "shh"
+    os.environ["DOWNSTREAMAPI_RETRIES"] = "notanint"
+
+    with pytest.raises(ValueError, match="DOWNSTREAMAPI_RETRIES.*int"):
+        await DownstreamAPI.from_env()
+
+
+async def test_secretstr_field_is_wrapped_correctly():
+    reset_env_and_instance(DownstreamAPI)
+    os.environ["DOWNSTREAMAPI_TOKEN"] = "abc"
+    os.environ["DOWNSTREAMAPI_URL"] = "https://x.com"
+    os.environ["DOWNSTREAMAPI_SECRET"] = "supersecret"
+
+    block = await DownstreamAPI.from_env()
+    assert isinstance(block.secret, SecretStr)
+    assert block.secret.get_secret_value() == "supersecret"
