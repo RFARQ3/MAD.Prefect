@@ -135,7 +135,15 @@ class FsspecFileSystem(
         if not self.exists(path):
             return
 
-        self._fs.rm(resolved_path, recursive=recursive)
+        if not recursive:
+            self._fs.rm(resolved_path, recursive=False)
+            return
+
+        # Handle recursion manually to avoid ADLS2 Non-Empty Directory Error
+        for file in self.glob(f"{path}/**"):
+            self._fs.rm(self._resolve_path(file), recursive=False)
+
+        self._fs.rm(resolved_path, recursive=False)
 
     async def get_directory(
         self, from_path: str | None = None, local_path: str | None = None
