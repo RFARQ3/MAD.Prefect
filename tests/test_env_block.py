@@ -1,4 +1,5 @@
 import os
+from typing import Optional, Union
 import pytest
 from pydantic import SecretStr
 from mad_prefect.envblock import EnvBlock
@@ -189,8 +190,8 @@ async def test_union_field_casting_with_optional():
         prefix: str = "UnionTest"
         retries: int | str  # Union[int, str]
         region: None | str  # Optional[str]
-        token: str
-        url: str
+        token: Optional[str]
+        url: Union[str, int]
         secret: SecretStr
 
     test_env = {
