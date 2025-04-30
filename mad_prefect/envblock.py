@@ -67,13 +67,13 @@ class EnvBlock(Block):
         - Otherwise fallback to class name
         - Returned value is upper cased
         """
-        downstream_schema = cls.model_fields
-        downstream_prefix_field = downstream_schema.get("prefix")
-        downstream_prefix_default = (
-            downstream_prefix_field.default if downstream_prefix_field else None
+        model_fields = cls.model_fields
+        prefix_field = model_fields.get("prefix")
+        default_prefix = (
+            prefix_field.default if prefix_field else None
         )
 
-        prefix = downstream_prefix_default or cls.__name__
+        prefix = default_prefix or cls.__name__
         return prefix.upper()
 
     @classmethod
