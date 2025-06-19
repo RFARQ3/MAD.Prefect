@@ -153,7 +153,7 @@ class DataAssetCallable(Generic[P, R]):
         collector_artifacts = await collector.collect()
 
         if not collector_artifacts:
-            logger.warning(
+            logger.info(
                 f"Asset materialization for '{asset.name}' yielded no artifacts. The resulting asset will be empty."
             )
 
