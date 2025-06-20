@@ -44,11 +44,11 @@ class DataAsset(Generic[P, R]):
     async def __call__(self, *args: P.args, **kwargs: P.kwargs):
         return await self._callable(*args, **kwargs)
 
-    async def query(self, query_str: str | None = None):
+    async def query(self, query_str: str | None = None, params: object | None = None):
         result_artifact = await self()
         artifact_query = DataArtifactQuery([result_artifact])
 
-        return await artifact_query.query(query_str)
+        return await artifact_query.query(query_str, params=params)
 
     @cached_property
     def id(self):
