@@ -21,7 +21,7 @@ class DataAssetRun(BaseModel):
     async def persist(self):
         fs = await get_fs()
         path = f"{ASSET_METADATA_LOCATION}/asset_name={self.asset_name}/asset_id={self.asset_id}/asset_run_id={self.id}/metadata.json"
-        logger.debug(f"Persisting asset run metadata for run '{self.id}' to {path}")
+        logger.debug("Persisting asset run metadata", run_id=self.id, path=path)
         await fs.write_data(
             path,
             self,
