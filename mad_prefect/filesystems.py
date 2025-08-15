@@ -47,9 +47,19 @@ class FsspecFileSystem(
             **kwargs,
         )
 
+        account_name = (storage_options.get_secret_value()).get(
+            "account_name",
+        ) or os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
+
+        protocol = basepath.split(":")[0]
+        account_host = (
+            {"account_host": f"{account_name}.dfs.core.windows.net"}
+            if protocol == "az" and account_name
+            else {}
+        )
+
         fs, fs_url = fsspec.core.url_to_fs(
-            basepath,
-            **(storage_options.get_secret_value()),
+            basepath, **(storage_options.get_secret_value()), **account_host
         )
 
         self._fs: fsspec.AbstractFileSystem = fs
