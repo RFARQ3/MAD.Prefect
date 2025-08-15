@@ -3,6 +3,8 @@ from io import StringIO
 import os
 from typing import Any, cast
 from adlfs import AzureBlobFileSystem
+import adlfs
+import anyio
 from pandas import DataFrame, read_parquet, read_csv
 import prefect.filesystems
 import prefect.utilities.asyncutils
@@ -76,9 +78,16 @@ class FsspecFileSystem(
 
     def glob(self, path: str):
         # return relative paths to the basepath
-        abs_paths = self._fs.glob(self._resolve_path(path))
+        abs_paths = []
+        resolved_path = self._resolve_path(path)
 
-        print(f"glob abs_paths = {abs_paths}")
+        # Check if the filesystem is the specific Azure implementation that is returning a list incorrectly.
+        if isinstance(self._fs, adlfs.spec.AzureBlobFileSystem):
+            # If so, bypass the problematic async wrapper by calling the underlying synchronous glob method in a thread.
+            abs_paths = anyio.to_thread.run_sync(self._fs.glob, resolved_path)  # type: ignore
+        else:
+            # Otherwise, use the standard fsspec glob method.
+            abs_paths = self._fs.glob(resolved_path)
 
         return [
             cast(str, abs_path).replace(f"{self._fs_url}/", "")
