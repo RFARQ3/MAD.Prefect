@@ -2,6 +2,7 @@ import io
 from io import StringIO
 import os
 from typing import Any, cast
+from adlfs import AzureBlobFileSystem
 from pandas import DataFrame, read_parquet, read_csv
 import prefect.filesystems
 import prefect.utilities.asyncutils
@@ -62,6 +63,10 @@ class FsspecFileSystem(
             basepath, **(storage_options.get_secret_value()), **account_host
         )
 
+        azure_fs: AzureBlobFileSystem = fs
+        print(f"fs type: {type(fs)}")
+        print(f"account_host: {azure_fs.account_host}")
+
         self._fs: fsspec.AbstractFileSystem = fs
         self._fs_url: str = fs_url
 
@@ -72,6 +77,8 @@ class FsspecFileSystem(
     def glob(self, path: str):
         # return relative paths to the basepath
         abs_paths = self._fs.glob(self._resolve_path(path))
+
+        print(f"glob abs_paths = {abs_paths}")
 
         return [
             cast(str, abs_path).replace(f"{self._fs_url}/", "")
