@@ -74,19 +74,6 @@ class DataAssetCallable(Generic[P, R]):
             asset = asset.with_arguments(*args, **kwargs)
             return await asset()
 
-        bound_args = self.get_bound_arguments()
-        logger.debug(
-            f"Bound arguments for asset '{asset.name}': {bound_args.arguments}"
-        )
-
-        formatter = AssetTemplateFormatter(self.args, bound_args)
-        asset.name = formatter.format(asset.name) or ""
-        asset.path = formatter.format(asset.path) or ""
-        asset.options.artifacts_dir = (
-            formatter.format(asset.options.artifacts_dir) or ""
-        )
-        logger.debug(f"Formatted asset name: '{asset.name}', path: '{asset.path}'")
-
         self.asset_run = asset_run = DataAssetRun()
         asset_run.id = self._generate_asset_iteration_guid()
         asset_run.asset_id = asset.id

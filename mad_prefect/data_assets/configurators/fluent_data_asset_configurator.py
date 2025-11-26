@@ -36,9 +36,9 @@ class FluentDataAssetConfigurator(Generic[P, R]):
         # Return a new asset based on the bound arguments
         asset = DataAsset[P, R](
             new_fn,
-            self.asset.path,
-            self.asset.name,
-            self.asset.options,
+            self.asset.template_path,
+            self.asset.template_name,
+            self.asset.base_options,
         )
         return asset
 
@@ -56,18 +56,22 @@ class FluentDataAssetConfigurator(Generic[P, R]):
         logger.debug(f"Configuring asset '{self.asset.name}' with new options.")
         # Default to the current asset's options for any None values
         options = DataAssetOptions(
-            artifacts_dir=artifacts_dir or self.asset.options.artifacts_dir,
+            artifacts_dir=artifacts_dir or self.asset.base_options.artifacts_dir,
             snapshot_artifacts=snapshot_artifacts
-            or self.asset.options.snapshot_artifacts,
-            artifact_filetype=artifact_filetype or self.asset.options.artifact_filetype,
-            read_json_options=read_json_options or self.asset.options.read_json_options,
-            read_csv_options=read_csv_options or self.asset.options.read_csv_options,
-            cache_expiration=cache_expiration or self.asset.options.cache_expiration,
+            or self.asset.base_options.snapshot_artifacts,
+            artifact_filetype=artifact_filetype
+            or self.asset.base_options.artifact_filetype,
+            read_json_options=read_json_options
+            or self.asset.base_options.read_json_options,
+            read_csv_options=read_csv_options
+            or self.asset.base_options.read_csv_options,
+            cache_expiration=cache_expiration
+            or self.asset.base_options.cache_expiration,
         )
         asset = DataAsset(
             self.asset._fn,
-            path or self.asset.path,
-            name or self.asset.name,
+            path or self.asset.template_path,
+            name or self.asset.template_name,
             options=options,
         )
 
