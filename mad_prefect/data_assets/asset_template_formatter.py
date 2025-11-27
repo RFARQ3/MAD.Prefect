@@ -4,8 +4,6 @@ import inspect
 import string
 from typing import Any
 
-from mad_prefect.data_assets.data_asset import DataAsset
-
 
 class AssetTemplateFormatter:
     """Render data asset templates using bound argument context."""
@@ -50,7 +48,9 @@ class AssetTemplateFormatter:
                 )
             except KeyError as exc:
                 missing_key = exc.args[0] if exc.args else "<unknown>"
-                available_keys = ", ".join(sorted(self._format_kwargs.keys())) or "<none>"
+                available_keys = (
+                    ", ".join(sorted(self._format_kwargs.keys())) or "<none>"
+                )
                 raise KeyError(
                     "Missing format key "
                     f"'{missing_key}' while formatting asset template '{template}'. "
@@ -80,6 +80,8 @@ class AssetTemplateFormatter:
         accumulator: dict[str, Any],
         seen_assets: set[int],
     ) -> None:
+        from mad_prefect.data_assets.data_asset import DataAsset
+
         if not isinstance(value, DataAsset):
             return
 
