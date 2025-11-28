@@ -71,8 +71,12 @@ class DataAssetCallable(Generic[P, R]):
             logger.debug(
                 f"Asset '{asset.name}' called with arguments, creating new configured asset instance."
             )
-            asset = asset.with_arguments(*args, **kwargs)
-            return await asset()
+            derived_asset = asset.with_arguments(*args, **kwargs)
+            result = await derived_asset()
+            self._sync_formatted_asset(derived_asset)
+            return result
+
+        asset = self._format_with_called_args(asset)
 
         self.asset_run = asset_run = DataAssetRun()
         asset_run.id = self._generate_asset_iteration_guid()
@@ -291,3 +295,25 @@ class DataAssetCallable(Generic[P, R]):
             base_path = f"{self.asset.options.artifacts_dir}/{partition}"
 
         return base_path
+
+    def _format_with_called_args(self, asset: DataAsset):
+        bound_args = self.get_bound_arguments()
+        logger.debug(
+            f"Bound arguments for called asset '{asset.name}': {bound_args.arguments}"
+        )
+
+        formatter = AssetTemplateFormatter(self.args, bound_args)
+        asset.name = formatter.format(asset.name) or ""
+        asset.path = formatter.format(asset.path) or ""
+        asset.options.artifacts_dir = (
+            formatter.format(asset.options.artifacts_dir) or ""
+        )
+        logger.debug(f"Formatted asset name: '{asset.name}', path: '{asset.path}'")
+
+        return asset
+
+    def _sync_formatted_asset(self, source: DataAsset) -> None:
+        """Mirror formatted attributes from a derived asset back to the caller."""
+        self.asset.name = source.name
+        self.asset.path = source.path
+        self.asset.options.artifacts_dir = source.options.artifacts_dir

@@ -102,9 +102,7 @@ def test_formatter_resolves_dict_access():
     )
     formatter = AssetTemplateFormatter(tuple(), bound_args)
 
-    assert (
-        formatter.format("{metadata['customer']}/{endpoint}") == "acme/orders"
-    )
+    assert formatter.format("{metadata[customer]}/{endpoint}") == "acme/orders"
 
 
 def test_duplicate_arguments():

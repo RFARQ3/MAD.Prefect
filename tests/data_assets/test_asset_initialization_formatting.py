@@ -79,7 +79,7 @@ async def test_callable_formatting():
     partial_asset = base.with_arguments(customer="test")
     await partial_asset(endpoint="lists")
 
-    assert partial_asset.path == "tests/lists.parquet"
+    assert partial_asset.path == "test/lists.parquet"
     assert partial_asset.name == "test-lists"
 
 
