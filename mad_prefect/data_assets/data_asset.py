@@ -54,12 +54,15 @@ class DataAsset(Generic[P, R]):
 
         if bound_args.arguments:
             formatter = AssetTemplateFormatter(self._callable.args, bound_args)
-            self.path = formatter.format(self.template_path) or self.template_path
+            self.path = (
+                formatter.format(self.template_path, allow_partial=True)
+                or self.template_path
+            )
             self.name = self._sanitize_name(
-                formatter.format(self.template_name) or ""
+                formatter.format(self.template_name, allow_partial=True) or ""
             ) or self._sanitize_name(self.template_name)
             self.options.artifacts_dir = (
-                formatter.format((self.template_artifacts_dir)) or ""
+                formatter.format(self.template_artifacts_dir, allow_partial=True) or ""
             )
         else:
             self.path = self.template_path
