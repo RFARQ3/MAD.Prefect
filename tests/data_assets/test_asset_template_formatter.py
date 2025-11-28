@@ -64,3 +64,18 @@ def test_formatter_handles_none_template():
     formatter = AssetTemplateFormatter(tuple(), bound_args)
 
     assert formatter.format(None) is None
+
+
+def test_duplicate_arguments():
+    @asset(path="listing/{endpoint}.parquet", name="{endpoint}")
+    def listing(endpoint: str):
+        return {endpoint: f"{endpoint}_value_1"}
+
+    @asset(path="detailed/{endpoint}/{listing_asset.name}.parquet")
+    def detailed(endpoint: str, listing_asset: DataAsset):
+        return {endpoint: f"{listing_asset.name}_value_2"}
+
+    widgets_listing = listing.with_arguments("widgets")
+    widgets_sales = detailed.with_arguments("sales", widgets_listing)
+
+    assert widgets_sales.path == "detailed/sales/widgets.parquet"
