@@ -1,6 +1,5 @@
-# tests/data_assets/test_template_initialization.py
-
 from mad_prefect.data_assets import asset
+from mad_prefect.data_assets.data_asset import DataAsset
 
 
 async def test_with_arguments_formats_templates_on_init():
@@ -67,3 +66,32 @@ async def test_with_options_updates_templates_for_future_derivatives():
     assert derived.path == "silver/widgets/data.parquet"
     assert derived.name == "silver-widgets"
     assert derived.options.artifacts_dir == "processed/widgets"
+
+
+async def test_callable_formatting():
+    @asset(
+        path="{customer}/{endpoint}.parquet",
+        name="{customer}-{endpoint}",
+    )
+    async def base(endpoint: str, customer: str):
+        return {customer: endpoint}
+
+    partial_asset = base.with_arguments(customer="test")
+    await partial_asset(endpoint="lists")
+
+    assert partial_asset.path == "tests/lists.parquet"
+    assert partial_asset.name == "test-lists"
+
+
+async def test_partial_initialization():
+    @asset(
+        path="{customer}/{listing_asset.name}_details.parquet",
+        name="{customer}-{listing_asset.name}-details",
+    )
+    async def detail_asset(listing_asset: DataAsset, customer: str):
+        return {customer: listing_asset.name}
+
+    partial_detail_asset = detail_asset.with_arguments(customer="ABC")
+
+    assert partial_detail_asset.path == "ABC/{listing_asset.name}_details.parquet"
+    assert partial_detail_asset.name == "ABC-{listing_asset.name}-details"
