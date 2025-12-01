@@ -1,3 +1,5 @@
+import pytest
+
 from mad_prefect.data_assets import asset
 from mad_prefect.data_assets.data_asset import DataAsset
 
@@ -95,3 +97,53 @@ async def test_partial_initialization():
 
     assert partial_detail_asset.path == "ABC/{listing_asset.name}_details.parquet"
     assert partial_detail_asset.name == "ABC-{listing_asset.name}-details"
+
+
+
+async def test_initialization_handles_missing_artifacts_dir_template():
+    """assets with literal or None artifacts_dir shouldn't break partial formatting."""
+
+    @asset(path="bronze/{endpoint}.parquet", artifacts_dir=None, name="{endpoint}")
+    async def base(endpoint: str):
+        return [{"endpoint": endpoint}]
+
+    derived = base.with_arguments("widgets")
+    assert derived.options.artifacts_dir == ""
+
+    configured = base.with_options(artifacts_dir="static/output")
+    configured_with_args = configured.with_arguments("widgets")
+    assert configured_with_args.options.artifacts_dir == "static/output"
+
+
+async def test_nested_asset_placeholders_survive_partial_pass():
+    """Parent assets referencing nested derivatives should keep unresolved placeholders."""
+
+    @asset(path="{segment}/{region}.parquet", name="{segment}-{region}")
+    async def child(segment: str, region: str):
+        return [segment, region]
+
+    @asset(path="combo/{child_asset.path}", name="combo-{child_asset.name}")
+    async def parent(child_asset: DataAsset):
+        return child_asset
+
+    partial_child = child.with_arguments(segment="north")
+    partial_parent = parent.with_arguments(child_asset=partial_child)
+
+    assert partial_parent.path == "combo/north/{region}.parquet"
+    assert partial_parent.name == "combo-north-{region}"
+
+    with pytest.raises(KeyError):
+        await partial_parent()
+
+
+async def test_call_raises_when_missing_placeholder_after_partial():
+    """Missing placeholders should raise during execution, not initialization."""
+
+    @asset(path="{customer}/{endpoint}.parquet", name="{customer}-{endpoint}")
+    async def base(customer: str, endpoint: str):
+        return customer, endpoint
+
+    partial_asset = base.with_arguments(customer="acme")
+
+    with pytest.raises(KeyError):
+        await partial_asset()
