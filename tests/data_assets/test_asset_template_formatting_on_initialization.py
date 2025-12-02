@@ -145,5 +145,54 @@ async def test_call_raises_when_missing_placeholder_after_partial():
 
     partial_asset = base.with_arguments(customer="acme")
 
-    with pytest.raises(KeyError):
+    with pytest.raises(KeyError) as exc_info:
         await partial_asset()
+
+    message = str(exc_info.value)
+    assert "Missing format key 'endpoint'" in message
+    assert "Available keys: customer" in message
+
+
+async def test_dict_key_placeholder_partially_formats_and_resolves_on_call():
+    """Dict key placeholders should remain intact until missing value is provided."""
+
+    @asset(
+        path="{metadata[customer]}/{endpoint}.parquet",
+        name="{metadata[customer]}-{endpoint}",
+    )
+    async def base(endpoint: str, metadata: dict[str, str]):
+        return metadata, endpoint
+
+    partial_asset = base.with_arguments(endpoint="orders")
+
+    assert partial_asset.path == "{metadata[customer]}/orders.parquet"
+    assert partial_asset.name == "{metadata_customer_}-orders"
+
+    await partial_asset(metadata={"customer": "acme"})
+
+    assert partial_asset.path == "acme/orders.parquet"
+    assert partial_asset.name == "acme-orders"
+
+
+async def test_direct_calls_reformat_between_invocations():
+    """Calling an asset with raw args should format each invocation independently."""
+
+    @asset(
+        path="{customer}/{endpoint}.parquet",
+        artifacts_dir="bronze/{customer}",
+        name="{customer}-{endpoint}",
+    )
+    async def interactions(endpoint: str, customer: str):
+        return [{"customer": customer, "endpoint": endpoint}]
+    
+
+    first = await interactions("a", "bob")
+    assert first.path == "bob/a.parquet"
+    assert interactions.path == "bob/a.parquet"
+
+    second = await interactions("b", "slob")
+    assert second.path == "slob/b.parquet"
+    assert interactions.path == "slob/b.parquet"
+
+    # Original artifact reference shouldn't be mutated by the second call
+    assert first.path == "bob/a.parquet"

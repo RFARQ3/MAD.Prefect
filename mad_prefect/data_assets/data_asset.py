@@ -70,9 +70,10 @@ class DataAsset(Generic[P, R]):
 
         logger.info(f"DataAsset '{self.name}' initialized for path '{self.path}'.")
 
-        logger.debug(f"Bound arguments for asset '{self.name}': {bound_args.arguments}")
-
-        logger.debug(f"Formatted asset name: '{self.name}', path: '{self.path}'")
+        logger.debug(
+            f"DataAsset '{self.name}' initialized with bound args {bound_args.arguments}, "
+            f"path: '{self.path}', artifacts_dir: '{self.options.artifacts_dir}'"
+        )
 
     @overload
     async def __call__(self, *args: P.args, **kwargs: P.kwargs) -> DataArtifact: ...

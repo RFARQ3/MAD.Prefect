@@ -29,12 +29,12 @@ await acme(endpoint="orders")
 - [ ] Introduce `base_options` + `deepcopy` during `DataAsset` construction so each derivative begins with a clean template.
 - [ ] Teach `AssetTemplateFormatter` (or a wrapper) to support `allow_partial=True` for initialization.
 - [ ] Reapply strict formatting on `DataAssetCallable.__call__`, merging previously bound args with new call-time args.
-- [ ] Add focused tests (`tests/data_assets/test_asset_initialization_formatting.py`) that demonstrate partial/strict behavior, `with_options` template overrides, and option isolation.
+- [ ] Add focused tests (`tests/data_assets/test_asset_template_formatting_on_initialization.py`) that demonstrate partial/strict behavior, `with_options` template overrides, and option isolation.
 
 ## Next Steps
 - Prototype the formatter split and ensure partial formatting leaves unbound placeholders untouched.
 - Wire strict formatting back into the callable path and confirm missing placeholders surface as `KeyError`s with clear context.
-- Validate via `pytest tests/data_assets/test_asset_initialization_formatting.py` once the new coverage lands; expand to the full suite afterward.
+- Validate via `pytest test_asset_template_formatting_on_initialization.py` once the new coverage lands; expand to the full suite afterward.
 - Update other docs (e.g., cache-first, MAD protocol) only if their examples rely on the old formatting semantics.
 
 ## Blockers & Risks

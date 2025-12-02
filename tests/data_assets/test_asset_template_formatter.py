@@ -79,6 +79,19 @@ def test_partial_format_preserves_indexed_placeholders():
     )
 
 
+def test_partial_format_preserves_dict_key_placeholders():
+    def fn(endpoint: str):
+        return endpoint
+
+    bound_args = inspect.signature(fn).bind_partial(endpoint="orders")
+    formatter = AssetTemplateFormatter(tuple(), bound_args)
+
+    template = "{metadata[customer]}/{endpoint}"
+    assert (
+        formatter.format(template, allow_partial=True) == "{metadata[customer]}/orders"
+    )
+
+
 def test_formatter_resolves_index_access_when_values_present():
     def fn(customer_paths: list[str], endpoint: str):
         return customer_paths, endpoint

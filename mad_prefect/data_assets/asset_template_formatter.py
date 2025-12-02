@@ -142,4 +142,4 @@ class _Placeholder(str):
 
     def __getitem__(self, item: Any) -> "_Placeholder":
         # Support index access (e.g. "[0]") while keeping template markers intact.
-        return _Placeholder(f"{self.strip('{}')}[{item!r}]")
+        return _Placeholder(f"{self.strip('{}')}[{item}]")
