@@ -71,10 +71,15 @@ class DataAssetCallable(Generic[P, R]):
             logger.debug(
                 f"Asset '{asset.name}' called with arguments, creating new configured asset instance."
             )
+            # Derive new asset with called args
             derived_asset = asset.with_arguments(*args, **kwargs)
-            result = await derived_asset()
-            self._sync_formatted_asset(derived_asset)
-            return result
+
+            # If original asset was already concrete, sync with called parameters
+            if self._check_asset_resolution(asset):
+                self._sync_formatted_asset(derived_asset)
+
+            # Call new asset for strict formatting
+            return await derived_asset()
 
         asset = self._format_with_called_args(asset)
 
@@ -311,9 +316,23 @@ class DataAssetCallable(Generic[P, R]):
         logger.debug(f"Formatted asset name: '{asset.name}', path: '{asset.path}'")
 
         return asset
+    
+    def _check_asset_resolution(self, asset: DataAsset) -> bool:
+        bound_args = self.get_bound_arguments()
+        formatter = AssetTemplateFormatter(self.args, bound_args)
 
+        asset_path_resolution = formatter._has_unresolved_fields(asset.path)
+        asset_name_resolution = formatter._has_unresolved_fields(asset.name)
+        asset_artifacts_dir = formatter._has_unresolved_fields(asset.options.artifacts_dir)
+
+        if asset_path_resolution or asset_name_resolution or asset_artifacts_dir:
+            return False
+        
+        return True
+    
     def _sync_formatted_asset(self, source: DataAsset) -> None:
         """Mirror formatted attributes from a derived asset back to the caller."""
         self.asset.name = source.name
         self.asset.path = source.path
         self.asset.options.artifacts_dir = source.options.artifacts_dir
+

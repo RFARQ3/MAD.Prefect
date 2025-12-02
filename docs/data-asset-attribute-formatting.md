@@ -3,7 +3,7 @@
 ## Summary
 - Today, `DataAsset.with_arguments()` mutates a shared `DataAssetOptions` reference and only formats attribute templates when the asset is awaited, which causes sibling derivatives to bleed state and delays format errors until runtime.
 - We want attribute formatting in two passes: a **partial** formatting step during asset initialization (format only the provided arguments, never raise) and a **strict** formatting step inside `DataAssetCallable.__call__` (all placeholders must resolve, otherwise raise immediately).
-- We also need targeted regression coverage to prove option isolation, template overrides, partial derivatives, and call-time validation all behave as expected.
+- We also need targeted regression coverage to prove option isolation, template overrides, partial derivatives, and call-time validation all behave as expected. Concrete derivatives (created via `with_arguments`) should sync updates when re-invoked, but the factory asset must retain its template values.
 
 ## Usage (planned)
 ```python

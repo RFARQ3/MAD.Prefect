@@ -79,10 +79,11 @@ async def test_callable_formatting():
         return {customer: endpoint}
 
     partial_asset = base.with_arguments(customer="test")
-    await partial_asset(endpoint="lists")
+    artifact = await partial_asset(endpoint="lists")
 
-    assert partial_asset.path == "test/lists.parquet"
-    assert partial_asset.name == "test-lists"
+    assert partial_asset.path == "test/{endpoint}.parquet"
+    assert partial_asset.name == "test-{endpoint}"
+    assert artifact.path == "test/lists.parquet"
 
 
 async def test_partial_initialization():
@@ -168,10 +169,11 @@ async def test_dict_key_placeholder_partially_formats_and_resolves_on_call():
     assert partial_asset.path == "{metadata[customer]}/orders.parquet"
     assert partial_asset.name == "{metadata_customer_}-orders"
 
-    await partial_asset(metadata={"customer": "acme"})
+    artifact = await partial_asset(metadata={"customer": "acme"})
 
-    assert partial_asset.path == "acme/orders.parquet"
-    assert partial_asset.name == "acme-orders"
+    assert partial_asset.path == "{metadata[customer]}/orders.parquet"
+    assert partial_asset.name == "{metadata_customer_}-orders"
+    assert artifact.path == "acme/orders.parquet"
 
 
 async def test_direct_calls_reformat_between_invocations():
@@ -188,11 +190,32 @@ async def test_direct_calls_reformat_between_invocations():
 
     first = await interactions("a", "bob")
     assert first.path == "bob/a.parquet"
-    assert interactions.path == "bob/a.parquet"
+    assert interactions.path == "{customer}/{endpoint}.parquet"
 
     second = await interactions("b", "slob")
     assert second.path == "slob/b.parquet"
-    assert interactions.path == "slob/b.parquet"
+    assert interactions.path == "{customer}/{endpoint}.parquet"
 
-    # Original artifact reference shouldn't be mutated by the second call
+    # Previously returned artifact should remain unchanged
     assert first.path == "bob/a.parquet"
+
+
+async def test_concrete_asset_syncs_when_reinvoked_with_new_args():
+    """Fully formatted derivatives should update their attributes when overridden."""
+
+    @asset(
+        path="{customer}/{endpoint}.parquet",
+        artifacts_dir="bronze/{customer}",
+        name="{customer}-{endpoint}",
+    )
+    async def interactions(endpoint: str, customer: str):
+        return [{"customer": customer, "endpoint": endpoint}]
+
+    concrete = interactions.with_arguments(endpoint="orders", customer="alpha")
+    assert concrete.path == "alpha/orders.parquet"
+    assert concrete.options.artifacts_dir == "bronze/alpha"
+
+    await concrete(endpoint="returns", customer="bravo")
+
+    assert concrete.path == "bravo/returns.parquet"
+    assert concrete.options.artifacts_dir == "bronze/bravo"
