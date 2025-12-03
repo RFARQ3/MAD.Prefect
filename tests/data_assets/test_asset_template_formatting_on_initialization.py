@@ -115,6 +115,10 @@ async def test_initialization_handles_missing_artifacts_dir_template():
     configured_with_args = configured.with_arguments("widgets")
     assert configured_with_args.options.artifacts_dir == "static/output"
 
+    configured_empty = base.with_options(artifacts_dir="")
+    configured_empty_with_args = configured_empty.with_arguments("widgets")
+    assert configured_empty_with_args.options.artifacts_dir == ""
+
 
 async def test_nested_asset_placeholders_survive_partial_pass():
     """Parent assets referencing nested derivatives should keep unresolved placeholders."""
