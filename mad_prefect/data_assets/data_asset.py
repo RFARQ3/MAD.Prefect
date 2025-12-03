@@ -49,18 +49,17 @@ class DataAsset(Generic[P, R]):
         self._fn = fn
         self._callable = DataAssetCallable(self)
 
-        # Format relevant fields if arguments are bound
+        # Lazily format relevant fields if arguments are bound
         bound_args = self._callable.get_bound_arguments()
-
+        
         if bound_args.arguments:
             formatter = AssetTemplateFormatter(self._callable.args, bound_args)
             self.path = (
                 formatter.format(self.template_path, allow_partial=True)
                 or self.template_path
             )
-            self.name = self._sanitize_name(
-                formatter.format(self.template_name, allow_partial=True) or ""
-            ) or self._sanitize_name(self.template_name)
+            formatted_name = formatter.format(self.template_name, allow_partial=True)
+            self.name = self._sanitize_name(formatted_name or self.template_name)
             self.options.artifacts_dir = (
                 formatter.format(self.template_artifacts_dir, allow_partial=True) or ""
             )
