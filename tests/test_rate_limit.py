@@ -29,12 +29,12 @@ def limiter(**kwargs):
     return ApiRateLimit(name="test-account", requests_per_second=2 / 3, **kwargs)
 
 
-async def test_existing_limit_is_checked_before_each_acquisition(backend):
+async def test_existing_limit_is_checked_once_per_instance(backend):
     client, acquire = backend
     rate = limiter()
     await rate.acquire()
     await rate.acquire()
-    assert client.read_global_concurrency_limit_by_name.await_count == 2
+    assert client.read_global_concurrency_limit_by_name.await_count == 1
     client.create_global_concurrency_limit.assert_not_called()
     assert acquire.await_count == 2
     acquire.assert_awaited_with("test-account", occupy=1, strict=True, timeout_seconds=120)
@@ -120,3 +120,59 @@ def test_invalid_rates_rejected(rate):
 def test_invalid_names_rejected(name):
     with pytest.raises(ValidationError):
         ApiRateLimit(name=name, requests_per_second=1)
+
+
+async def test_concurrent_first_calls_share_validation(backend):
+    client, acquire = backend
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    settings = client.read_global_concurrency_limit_by_name.return_value
+    async def read(name):
+        entered.set()
+        await release.wait()
+        return settings
+    client.read_global_concurrency_limit_by_name.side_effect = read
+    rate = limiter()
+    first = asyncio.create_task(rate.acquire())
+    await entered.wait()
+    second = asyncio.create_task(rate.acquire())
+    await asyncio.sleep(0)
+    assert client.read_global_concurrency_limit_by_name.await_count == 1
+    release.set()
+    await asyncio.gather(first, second)
+    assert client.read_global_concurrency_limit_by_name.await_count == 1
+    assert acquire.await_count == 2
+
+
+async def test_failed_setup_is_not_cached(backend):
+    client, acquire = backend
+    settings = client.read_global_concurrency_limit_by_name.return_value
+    client.read_global_concurrency_limit_by_name.side_effect = [OSError('unavailable'), settings]
+    rate = limiter()
+    with pytest.raises(OSError):
+        await rate.acquire()
+    await rate.acquire()
+    assert client.read_global_concurrency_limit_by_name.await_count == 2
+    acquire.assert_awaited_once()
+
+
+async def test_acquisition_retries_do_not_repeat_successful_setup(backend, monkeypatch):
+    from prefect.concurrency._asyncio import ConcurrencySlotAcquisitionError
+    client, acquire = backend
+    error = ConcurrencySlotAcquisitionError('synthetic')
+    error.__cause__ = httpx.ConnectError('synthetic')
+    acquire.side_effect = [error, None, None]
+    monkeypatch.setattr(module.asyncio, 'sleep', AsyncMock())
+    rate = limiter()
+    await rate.acquire()
+    await rate.acquire()
+    client.read_global_concurrency_limit_by_name.assert_awaited_once()
+    assert acquire.await_count == 3
+
+
+async def test_instances_validate_independently(backend):
+    client, acquire = backend
+    await limiter().acquire()
+    await limiter().acquire()
+    assert client.read_global_concurrency_limit_by_name.await_count == 2
+    assert acquire.await_count == 2

@@ -16,7 +16,9 @@ Different Prefect servers do not share an allowance, even with identical names.
 
 The first caller creates an active global concurrency limit with capacity one.
 Its slot decays at `requests_per_second`; capacity one avoids an initial burst.
-Creation races are safe. Every acquisition checks the existing configuration.
+Creation races are safe. The first acquisition validates configuration; later calls reuse that validation.
+Reuse the same limiter instance across requests. Concurrent callers share one setup
+lock, and unsuccessful setup is never cached.
 An inactive or differently configured limit fails instead of being overwritten.
 Missing server configuration, server errors and timeouts prevent the HTTP attempt.
 `wait_timeout_seconds` bounds configuration checks and acquisition together.
@@ -51,7 +53,8 @@ systems are needed for unit tests or the local synthetic demonstration.
 errors and HTTP 500/502/503/504 responses, including transport errors explicitly
 wrapped by Prefect's `ConcurrencySlotAcquisitionError`. Missing limits without a
 transport cause, invalid settings, authentication failures and cancellation are
-not retried. Each retry checks configuration again and must acquire an allowance.
+not retried. Setup failures retry validation; after successful validation, acquisition retries
+only request an allowance and do not reread configuration.
 
 Defaults are four total attempts, a one-second initial backoff and a ten-second
 backoff cap. Backoff doubles and is jittered between half and all of that delay.
@@ -69,3 +72,13 @@ A lost response can mean the server granted an allowance that the caller never
 received. Retrying can consume another allowance, reducing throughput, but never
 permits an unconfirmed downstream request. Persistent server outages still fail
 within the configured budget. This does not retry or change provider HTTP calls.
+
+## Setup cache lifetime
+
+Validation is cached per instance, not per process or account. After setup, the
+normal path makes one Prefect slot-acquisition request per physical HTTP attempt;
+Prefect may make additional requests while waiting for capacity or recovering.
+Create a fresh instance after configuration or server changes. Changes to an
+active limit are not polled: stop consumers before editing or disabling limits,
+then restart them. A deleted limit still fails strict acquisition; it is not
+silently recreated by a previously initialized instance.

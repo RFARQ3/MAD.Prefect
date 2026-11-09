@@ -13,7 +13,7 @@ from prefect.concurrency._asyncio import ConcurrencySlotAcquisitionError
 from prefect.exceptions import MissingContextError, ObjectNotFound
 from prefect.logging import get_run_logger
 from prefect.settings import PREFECT_API_URL
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 
 def _transient_error(error: Exception) -> Exception | None:
@@ -43,6 +43,9 @@ class ApiRateLimit(BaseModel):
     max_attempts: int = Field(default=4, ge=1, le=100)
     retry_delay_seconds: float = Field(default=1, gt=0, allow_inf_nan=False)
     max_retry_delay_seconds: float = Field(default=10, gt=0, allow_inf_nan=False)
+
+    _ready: bool = PrivateAttr(default=False)
+    _setup_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
 
     async def acquire(self) -> None:
         """Retry temporary Prefect failures without creating per-request tasks."""
@@ -90,7 +93,20 @@ class ApiRateLimit(BaseModel):
             raise
 
     async def _acquire_once(self) -> None:
-        """Recheck server configuration before each acquisition attempt."""
+        """Validate once, then acquire an allowance for every physical request."""
+        if not self._ready:
+            # Concurrent callers share setup; failures leave it eligible for retry.
+            async with self._setup_lock:
+                if not self._ready:
+                    await self._validate_limit()
+                    self._ready = True
+
+        await rate_limit(
+            self.name, occupy=1, strict=True,
+            timeout_seconds=self.wait_timeout_seconds,
+        )
+
+    async def _validate_limit(self) -> None:
         async with get_client() as client:
             try:
                 limit = await client.read_global_concurrency_limit_by_name(self.name)
@@ -119,8 +135,3 @@ class ApiRateLimit(BaseModel):
                 )
             ):
                 raise ValueError(f"Prefect rate limit {self.name!r} has incompatible settings")
-
-        await rate_limit(
-            self.name, occupy=1, strict=True,
-            timeout_seconds=self.wait_timeout_seconds,
-        )
