@@ -34,7 +34,7 @@ do not use this limit still consume the provider's allowance.
 
 ## Progress
 
-Shared limiter implemented; validation results recorded with the feature handoff.
+Shared limiter and bounded recovery implemented. Synthetic tests cover wrapped connection failures, recovery logging, capped backoff, exhaustion, cancellation, configuration errors and the total deadline.
 
 ## Next Steps
 
@@ -44,3 +44,28 @@ Review the KnowBe4 consumer demonstration before merging and releasing.
 
 Production validation requires separately authorized access. No live customer
 systems are needed for unit tests or the local synthetic demonstration.
+
+## Recovery from temporary Prefect failures
+
+`acquire()` retries network failures, HTTP transport timeouts, remote protocol
+errors and HTTP 500/502/503/504 responses, including transport errors explicitly
+wrapped by Prefect's `ConcurrencySlotAcquisitionError`. Missing limits without a
+transport cause, invalid settings, authentication failures and cancellation are
+not retried. Each retry checks configuration again and must acquire an allowance.
+
+Defaults are four total attempts, a one-second initial backoff and a ten-second
+backoff cap. Backoff doubles and is jittered between half and all of that delay.
+Configure `max_attempts`, `retry_delay_seconds` and `max_retry_delay_seconds` on
+`ApiRateLimit`. `wait_timeout_seconds` remains one total deadline including all
+attempts, configuration checks, sleeps and time waiting for an allowance.
+
+Warnings record the limit name, attempt, error class and next delay; an INFO
+message records recovery and an ERROR records exhaustion or timeout. In a Prefect
+run these use its run logger; outside runs they use the module's Python logger.
+Exception text, request URLs, response bodies and credentials are not logged by
+this retry mechanism. No additional Prefect tasks are created.
+
+A lost response can mean the server granted an allowance that the caller never
+received. Retrying can consume another allowance, reducing throughput, but never
+permits an unconfirmed downstream request. Persistent server outages still fail
+within the configured budget. This does not retry or change provider HTTP calls.

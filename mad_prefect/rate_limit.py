@@ -1,15 +1,34 @@
 """Shared request pacing through Prefect's global concurrency limits."""
 
 import asyncio
+import logging
 import math
+import random
 
-from httpx import HTTPStatusError
+from httpx import HTTPStatusError, NetworkError, RemoteProtocolError, TimeoutException
 from prefect.client.orchestration import get_client
 from prefect.client.schemas.actions import GlobalConcurrencyLimitCreate
 from prefect.concurrency.asyncio import rate_limit
-from prefect.exceptions import ObjectNotFound
+from prefect.concurrency._asyncio import ConcurrencySlotAcquisitionError
+from prefect.exceptions import MissingContextError, ObjectNotFound
+from prefect.logging import get_run_logger
 from prefect.settings import PREFECT_API_URL
 from pydantic import BaseModel, ConfigDict, Field
+
+
+def _transient_error(error: Exception) -> Exception | None:
+    # Prefect wraps transport errors during slot acquisition. Missing limits use
+    # the same wrapper but must fail immediately, so inspect only explicit causes.
+    while isinstance(error, ConcurrencySlotAcquisitionError):
+        cause = error.__cause__
+        if not isinstance(cause, Exception) or cause is error:
+            return None
+        error = cause
+    if isinstance(error, (NetworkError, TimeoutException, RemoteProtocolError)):
+        return error
+    if isinstance(error, HTTPStatusError) and error.response.status_code in (500, 502, 503, 504):
+        return error
+    return None
 
 
 class ApiRateLimit(BaseModel):
@@ -21,43 +40,87 @@ class ApiRateLimit(BaseModel):
     requests_per_second: float = Field(gt=0, allow_inf_nan=False)
     wait_timeout_seconds: float = Field(default=120, gt=0, allow_inf_nan=False)
 
+    max_attempts: int = Field(default=4, ge=1, le=100)
+    retry_delay_seconds: float = Field(default=1, gt=0, allow_inf_nan=False)
+    max_retry_delay_seconds: float = Field(default=10, gt=0, allow_inf_nan=False)
+
     async def acquire(self) -> None:
-        """Wait for permission before one HTTP attempt; fail if coordination fails."""
+        """Retry temporary Prefect failures without creating per-request tasks."""
         if not PREFECT_API_URL.value():
             raise RuntimeError("Shared API rate limits require a configured PREFECT_API_URL")
+        try:
+            logger = get_run_logger()
+        except MissingContextError:
+            logger = logging.getLogger(__name__)
 
-        # Bound both server configuration checks and waiting for an allowance.
-        async with asyncio.timeout(self.wait_timeout_seconds):
-            async with get_client() as client:
-                try:
-                    limit = await client.read_global_concurrency_limit_by_name(self.name)
-                except ObjectNotFound:
+        delay = min(self.retry_delay_seconds, self.max_retry_delay_seconds)
+        attempt = 0
+        try:
+            # One deadline covers setup, all attempts, backoff and slot waiting.
+            async with asyncio.timeout(self.wait_timeout_seconds):
+                for attempt in range(1, self.max_attempts + 1):
                     try:
-                        await client.create_global_concurrency_limit(
-                            GlobalConcurrencyLimitCreate(
-                                name=self.name,
-                                limit=1,
-                                active=True,
-                                slot_decay_per_second=self.requests_per_second,
+                        await self._acquire_once()
+                    except Exception as error:
+                        transient = _transient_error(error)
+                        if transient is None or attempt == self.max_attempts:
+                            logger.error(
+                                "Rate limit %s failed on attempt %d/%d (%s); no request permitted",
+                                self.name, attempt, self.max_attempts,
+                                type(transient if transient is not None else error).__name__,
                             )
-                        )
-                    except HTTPStatusError as error:
-                        # Another pod can create the account's limit at the same time.
-                        if error.response.status_code != 409:
                             raise
-                    limit = await client.read_global_concurrency_limit_by_name(self.name)
 
-                # Never let one deployment silently change another deployment's quota.
-                if (
-                    not limit.active
-                    or limit.limit != 1
-                    or not math.isclose(
-                        limit.slot_decay_per_second, self.requests_per_second, rel_tol=1e-6
+                        # Jitter keeps recovering pods from reconnecting together.
+                        wait = random.uniform(delay / 2, delay)
+                        logger.warning(
+                            "Rate limit %s attempt %d/%d failed (%s); retrying in %.2fs",
+                            self.name, attempt, self.max_attempts, type(transient).__name__, wait,
+                        )
+                        await asyncio.sleep(wait)
+                        delay = min(delay * 2, self.max_retry_delay_seconds)
+                    else:
+                        if attempt > 1:
+                            logger.info("Rate limit %s recovered on attempt %d/%d",
+                                        self.name, attempt, self.max_attempts)
+                        return
+        except TimeoutError:
+            logger.error("Rate limit %s timed out on attempt %d/%d within %.2fs; no request permitted",
+                         self.name, attempt, self.max_attempts, self.wait_timeout_seconds)
+            raise
+
+    async def _acquire_once(self) -> None:
+        """Recheck server configuration before each acquisition attempt."""
+        async with get_client() as client:
+            try:
+                limit = await client.read_global_concurrency_limit_by_name(self.name)
+            except ObjectNotFound:
+                try:
+                    await client.create_global_concurrency_limit(
+                        GlobalConcurrencyLimitCreate(
+                            name=self.name,
+                            limit=1,
+                            active=True,
+                            slot_decay_per_second=self.requests_per_second,
+                        )
                     )
-                ):
-                    raise ValueError(f"Prefect rate limit {self.name!r} has incompatible settings")
+                except HTTPStatusError as error:
+                    # Another pod can create the account's limit at the same time.
+                    if error.response.status_code != 409:
+                        raise
+                limit = await client.read_global_concurrency_limit_by_name(self.name)
 
-            await rate_limit(
-                self.name, occupy=1, strict=True,
-                timeout_seconds=self.wait_timeout_seconds,
-            )
+            # Never let one deployment silently change another deployment's quota.
+            if (
+                not limit.active
+                or limit.limit != 1
+                or not math.isclose(
+                    limit.slot_decay_per_second, self.requests_per_second, rel_tol=1e-6
+                )
+            ):
+                raise ValueError(f"Prefect rate limit {self.name!r} has incompatible settings")
+
+        await rate_limit(
+            self.name, occupy=1, strict=True,
+            timeout_seconds=self.wait_timeout_seconds,
+        )
