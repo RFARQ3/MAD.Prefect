@@ -207,3 +207,18 @@ async def test_retry_logs_omit_request_details(monkeypatch, caplog):
     assert any('retry 1/2' in message for message in messages)
     assert any('recovered' in message for message in messages)
     assert all('secret' not in message and 'private' not in message for message in messages)
+
+
+async def test_empty_status_policy_survives_network_retry(monkeypatch):
+    monkeypatch.setattr(module.asyncio, 'sleep', AsyncMock())
+    calls = 0
+    def handle(request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ConnectError('synthetic')
+        return httpx.Response(503)
+    async with RetryingAsyncClient(retry=policy(retry_statuses=()),
+                                  transport=httpx.MockTransport(handle)) as client:
+        assert (await client.get('https://synthetic.invalid')).status_code == 503
+    assert calls == 2

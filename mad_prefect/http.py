@@ -62,8 +62,12 @@ class RetryingAsyncClient(httpx.AsyncClient):
         deadline = asyncio.get_running_loop().time() + policy.total_timeout_seconds
 
         # The library owns the retry loop, exception selection and response cleanup.
-        # Override only waiting: provider Retry-After must never be clipped early.
+        # Provider Retry-After must never be clipped early.
         class RequestRetry(Retry):
+            def is_retryable_status_code(self, status_code: int) -> bool:
+                # The library treats an empty status list as its defaults.
+                return status_code in policy.retry_statuses
+
             async def asleep(self, response: httpx.Response | Exception) -> None:
                 delay = None
                 if isinstance(response, httpx.Response):
@@ -93,8 +97,6 @@ class RetryingAsyncClient(httpx.AsyncClient):
             backoff_factor=policy.backoff_factor, max_backoff_wait=policy.max_backoff_seconds,
             backoff_jitter=policy.backoff_jitter,
         )
-        # An empty list otherwise selects the library defaults rather than no statuses.
-        retry.status_forcelist = frozenset(policy.retry_statuses)
         try:
             async with asyncio.timeout(policy.total_timeout_seconds):
                 response = await aretry_request(self, method, url, retry=retry, **kwargs)
