@@ -1,12 +1,19 @@
 # Shared API rate limits
 
 ```python
+import httpx
 from mad_prefect.rate_limit import ApiRateLimit
 
 limit = ApiRateLimit(name="example-account", requests_per_second=2 / 3)
-await limit.acquire()
-response = await http_client.get("users")
+async with httpx.AsyncClient() as client:
+    await limit.acquire()
+    response = await client.get("https://api.example.com/users")
 ```
+
+MAD.Prefect shares request spacing across Kubernetes pods without choosing an HTTP
+retry system. For HTTPX, use [the transport adapter and retry examples](http-retries.md)
+to acquire automatically before each attempt. The manual form above is useful for
+other clients.
 
 Call `acquire()` immediately before **every physical HTTP attempt**, including
 retries. HTTPX still sends the request. Prefect grants the shared allowance.

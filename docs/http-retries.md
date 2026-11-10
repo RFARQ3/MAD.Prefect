@@ -1,54 +1,101 @@
-# Shared HTTP retries
+# Choose your own HTTP retries
 
 ```python
-from mad_prefect.http import HttpRetryPolicy, RetryingAsyncClient
-from mad_prefect.rate_limit import ApiRateLimit
+import httpx
+from mad_prefect.rate_limit import ApiRateLimit, RateLimitedAsyncTransport
 
 limit = ApiRateLimit(name="provider-account", requests_per_second=2 / 3)
-policy = HttpRetryPolicy(max_attempts=3, total_timeout_seconds=720,
-                         rate_limit_fallback_seconds=300)
-async with RetryingAsyncClient(base_url="https://api.example.com/",
-                               retry=policy, rate_limit=limit) as client:
-    response = await client.get("users", params={"page": 1})
+network = httpx.AsyncHTTPTransport(retries=0)
+paced = RateLimitedAsyncTransport(limit, network)
+
+async with httpx.AsyncClient(transport=paced) as client:
+    response = await client.get("https://api.example.com/users")
     response.raise_for_status()
 ```
 
-`httpx-retries` supplies the retry loop, response cleanup, transient HTTP exception
-selection, backoff calculation and Retry-After parsing. The shared client connects
-that loop to an optional limiter via a request hook, so each attempt and redirect
-must acquire an allowance. Reuse a limiter across clients to retain setup caching.
-Omit `rate_limit` for HTTP retries without Prefect rate-limit access.
+This client has shared rate limiting and no HTTP retries. MAD.Prefect supplies
+the allowance and the small transport adapter. Your repository chooses whether
+to retry, which failures qualify, and how long to wait.
 
-Use `get`, `head` or `request` for buffered reads. Other methods are rejected;
-streaming and direct `send` are not covered by the retry/deadline contract. Use a
-plain HTTPX client for those operations. Do not combine this client with another
-retrying transport or authentication scheme that resends requests. Ordinary
-HTTPX options, including headers, timeouts and mock transports, remain available.
+## Using httpx-retries
 
-The policy controls attempts, statuses, exponential backoff, jitter, total elapsed
-time and an optional 429 fallback. Retry-After dates and integer seconds are honored
-without clipping to the backoff cap. If a delay cannot fit the remaining deadline,
-the call fails without retrying early. One deadline includes limiter acquisition,
-HTTP requests and all sleeps. Final HTTP responses are returned as HTTPX normally
-does; callers choose whether to call `raise_for_status()`.
+Install `httpx-retries` in the consuming repository, then wrap the paced transport:
 
-Limiter failures retain the limiter's own bounded recovery and are not retried by
-the HTTP loop. Cancellation propagates. Retry warnings and recovery/failure logs
-use the current Prefect run logger, or a Python logger outside runs, without
-including URLs, credentials or response bodies. Normal HTTPX/library logging is
-configured separately. No per-request Prefect tasks are created.
+```python
+from httpx_retries import Retry, RetryTransport
+
+# Reuse the limiter, but create a fresh network transport for each client.
+network = httpx.AsyncHTTPTransport(retries=0)
+paced = RateLimitedAsyncTransport(limit, network)
+retrying = RetryTransport(
+    transport=paced,
+    retry=Retry(total=2, allowed_methods=["GET", "HEAD"], backoff_factor=0.5),
+)
+async with httpx.AsyncClient(transport=retrying) as client:
+    response = await client.get("https://api.example.com/users")
+    response.raise_for_status()
+```
+
+The order is client, retry transport, rate-limit transport, network transport.
+When the retry transport tries again, it must pass through the limiter again.
+Putting retries inside the paced transport would let those extra requests bypass
+the limiter. Leave the network transport's own retries disabled. Apply the same
+ordering to custom transports and any HTTPX mounts.
+
+A request hook alone is insufficient for this arrangement: retries inside a
+transport do not call the client's request hooks again. The transport adapter
+puts the allowance check immediately before the network attempt instead.
+
+## Other retry systems, including Prefect tasks
+
+A caller can retry `client.get()` using another library, a small retry loop or a
+Prefect task. Each call still reaches the paced transport. A retried Prefect task
+reruns the whole task body, so choose a task boundary that is safe to repeat.
+The rate limiter neither replaces Prefect tasks nor creates tasks of its own.
+
+For clients other than HTTPX, call `await limit.acquire()` immediately before
+each actual attempt. If the client retries internally, put acquisition inside
+its retry callback or transport. Acquiring once before an entire retry loop
+does not cover subsequent attempts.
+
+## Two different failures
+
+`ApiRateLimit.acquire()` retries temporary failures while contacting Prefect.
+Those retries are bounded and logged by MAD.Prefect. If acquisition ultimately
+fails, the transport raises `RateLimitAcquisitionError` and sends no API request.
+The original error is its `__cause__`. This separate exception prevents HTTPX
+retry policies from treating a Prefect connection failure as a provider failure.
+
+The downstream retry system handles provider responses and network failures.
+It should exclude `RateLimitAcquisitionError`; a broad retry-on-any-exception
+policy would otherwise multiply the limiter's retries. Cancellation propagates.
+The adapter returns provider responses and errors unchanged and closes the
+wrapped network transport when the client closes.
+
+Provider cooldowns such as `Retry-After` remain the downstream policy's concern.
+Check the chosen retry library's delay cap and total time budget: never shorten
+a provider's required wait merely to fit a backoff cap. KnowBe4's local retry
+client demonstrates preserving its five-minute cooldown and bounded deadline.
+
+## Migration from the feature branch's earlier client
+
+`mad_prefect.http.RetryingAsyncClient` and `HttpRetryPolicy` have been removed.
+Use an ordinary HTTPX client with the transport above, or your own retry client
+around that transport. MAD.Prefect no longer depends on `httpx-retries`.
+See [shared API rate limits](shared-api-rate-limit.md) for server configuration,
+setup caching, logging and limitations.
 
 ## Progress
 
-Shared HTTP client implemented with provider settings in KnowBe4. Validation uses
-synthetic HTTP responses and a disposable local Prefect server.
+Implemented with tests for independent retry composition, failure separation,
+redirects, cancellation and closing connections. KnowBe4 selects its own retries.
 
 ## Next Steps
 
-Review feature branches before release and authorized production rollout.
+Review the feature branches before release and authorized production rollout.
 
 ## Blockers & Risks
 
-This is a buffered GET/HEAD client, not a generic business-write retry mechanism.
-429 cooldowns apply to the caller; they are not broadcast across processes.
-The request hook is part of the pacing contract and must not be removed.
+Every actual attempt must pass through the paced transport. Hidden retries or
+HTTPX mounts that bypass it cannot be paced. Separate Prefect servers do not
+share allowances. Provider cooldowns are not broadcast between processes.

@@ -1121,21 +1121,6 @@ socks = ["socksio (==1.*)"]
 zstd = ["zstandard (>=0.18.0)"]
 
 [[package]]
-name = "httpx-retries"
-version = "0.6.0"
-description = "A retry layer for HTTPX."
-optional = false
-python-versions = ">=3.10"
-groups = ["main"]
-files = [
-    {file = "httpx_retries-0.6.0-py3-none-any.whl", hash = "sha256:d1e52a8f68a5df42de75ab89049d5020b2d0ab2f5f8bceacda008d12aa1257a3"},
-    {file = "httpx_retries-0.6.0.tar.gz", hash = "sha256:3e0b404969a564829d368417964fd21e6b400a10d17c92d29b8bc247ce8186e3"},
-]
-
-[package.dependencies]
-httpx = ">=0.20.0"
-
-[[package]]
 name = "humanize"
 version = "4.13.0"
 description = "Python humanize utilities"
@@ -4120,4 +4105,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.13"
-content-hash = "5c6b23f053e491125155cdf5ccadcc43782f12d18b86b23074d28428f03f575c"
+content-hash = "95fc745433398eb26628552ee1c8d98d89c36ac34ac8fc4f82c57b8bb324746e"

@@ -5,7 +5,15 @@ import logging
 import math
 import random
 
-from httpx import HTTPStatusError, NetworkError, RemoteProtocolError, TimeoutException
+from httpx import (
+    AsyncBaseTransport,
+    HTTPStatusError,
+    NetworkError,
+    RemoteProtocolError,
+    Request,
+    Response,
+    TimeoutException,
+)
 from prefect.client.orchestration import get_client
 from prefect.client.schemas.actions import GlobalConcurrencyLimitCreate
 from prefect.concurrency.asyncio import rate_limit
@@ -17,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 
 def _transient_error(error: Exception) -> Exception | None:
+    """Find a temporary Prefect failure without treating configuration errors as retryable."""
     # Prefect wraps transport errors during slot acquisition. Missing limits use
     # the same wrapper but must fail immediately, so inspect only explicit causes.
     while isinstance(error, ConcurrencySlotAcquisitionError):
@@ -32,7 +41,12 @@ def _transient_error(error: Exception) -> Exception | None:
 
 
 class ApiRateLimit(BaseModel):
-    """Use one name per provider account on the same Prefect server."""
+    """Share request spacing between processes using the same Prefect server.
+
+    Use one non-secret name per provider account and reuse this instance across
+    requests. Only successful setup is cached; each acquire still asks Prefect
+    for a new allowance. HTTP retries and provider cooldowns belong to the caller.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -40,6 +54,7 @@ class ApiRateLimit(BaseModel):
     requests_per_second: float = Field(gt=0, allow_inf_nan=False)
     wait_timeout_seconds: float = Field(default=120, gt=0, allow_inf_nan=False)
 
+    # These retries contact Prefect only. They never resend a provider request.
     max_attempts: int = Field(default=4, ge=1, le=100)
     retry_delay_seconds: float = Field(default=1, gt=0, allow_inf_nan=False)
     max_retry_delay_seconds: float = Field(default=10, gt=0, allow_inf_nan=False)
@@ -48,9 +63,15 @@ class ApiRateLimit(BaseModel):
     _setup_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
 
     async def acquire(self) -> None:
-        """Retry temporary Prefect failures without creating per-request tasks."""
+        """Wait for one confirmed allowance, or fail without permitting a request.
+
+        Temporary Prefect failures retry within one bounded deadline. No Prefect
+        task is created, and callers do not need to release a decaying allowance.
+        """
         if not PREFECT_API_URL.value():
             raise RuntimeError("Shared API rate limits require a configured PREFECT_API_URL")
+        # Attach recovery messages to the flow when available. Standalone callers
+        # still get the same messages through normal Python logging.
         try:
             logger = get_run_logger()
         except MissingContextError:
@@ -101,16 +122,23 @@ class ApiRateLimit(BaseModel):
                     await self._validate_limit()
                     self._ready = True
 
+        # A successful allowance is consumed, not released. Prefect restores it
+        # at the configured rate, which spaces requests across all participating pods.
         await rate_limit(
             self.name, occupy=1, strict=True,
             timeout_seconds=self.wait_timeout_seconds,
         )
 
     async def _validate_limit(self) -> None:
+        """Create a missing limit, but never overwrite another deployment's settings."""
+        # This client talks to the Prefect server, not the downstream API. Setup
+        # happens once per limiter so ordinary requests only acquire an allowance.
         async with get_client() as client:
             try:
                 limit = await client.read_global_concurrency_limit_by_name(self.name)
             except ObjectNotFound:
+                # Capacity one prevents an initial burst. Decay controls how soon
+                # another pod can consume the next allowance.
                 try:
                     await client.create_global_concurrency_limit(
                         GlobalConcurrencyLimitCreate(
@@ -135,3 +163,43 @@ class ApiRateLimit(BaseModel):
                 )
             ):
                 raise ValueError(f"Prefect rate limit {self.name!r} has incompatible settings")
+
+
+class RateLimitAcquisitionError(RuntimeError):
+    """Prefect could not confirm an allowance; no provider request was sent.
+
+    This is deliberately not an HTTPX network error. HTTP retry libraries must
+    not mistake a Prefect outage for a failed provider request and multiply the
+    limiter's bounded retries. The original exception remains available as cause.
+    """
+
+
+class RateLimitedAsyncTransport(AsyncBaseTransport):
+    """Acquire an allowance immediately before the wrapped transport sends.
+
+    Put retry transports outside this transport, and a non-retrying network
+    transport inside it. Each retry will then come back here for a new allowance.
+    Closing this transport also closes its wrapped transport.
+    """
+
+    def __init__(self, limiter: ApiRateLimit, transport: AsyncBaseTransport) -> None:
+        """Accept the limiter and network transport without selecting a retry library."""
+        self.limiter = limiter
+        self.transport = transport
+
+    async def handle_async_request(self, request: Request) -> Response:
+        """Confirm permission first, then send exactly one HTTP attempt."""
+        try:
+            await self.limiter.acquire()
+        except Exception as error:
+            # Keep Prefect failures separate from the HTTP errors returned by the
+            # provider transport below. Cancellation is not caught here.
+            raise RateLimitAcquisitionError(
+                "Could not acquire a Prefect rate-limit allowance"
+            ) from error
+
+        return await self.transport.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        """Release the network resources when the HTTP client closes."""
+        await self.transport.aclose()
