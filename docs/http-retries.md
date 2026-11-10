@@ -74,8 +74,8 @@ wrapped network transport when the client closes.
 
 Provider cooldowns such as `Retry-After` remain the downstream policy's concern.
 Check the chosen retry library's delay cap and total time budget: never shorten
-a provider's required wait merely to fit a backoff cap. KnowBe4's local retry
-client demonstrates preserving its five-minute cooldown and bounded deadline.
+a provider's required wait merely to fit a backoff cap. KnowBe4 calls aretry_request directly, using a response hook for its five-minute
+cooldown fallback and asyncio.timeout for its overall deadline.
 
 ## Migration from the feature branch's earlier client
 
