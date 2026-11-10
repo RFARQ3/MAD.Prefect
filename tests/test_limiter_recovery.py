@@ -109,3 +109,25 @@ async def test_logs_use_prefect_run_logger_when_available(backend, monkeypatch):
     logger.warning.assert_called_once()
     logger.info.assert_called_once()
     logger.error.assert_not_called()
+
+
+@pytest.mark.parametrize('error, expected', [
+    (httpx.ConnectError('synthetic'), True),
+    (httpx.ReadTimeout('synthetic'), True),
+    (httpx.RemoteProtocolError('synthetic'), True),
+    (ValueError('invalid settings'), False),
+    (ConcurrencySlotAcquisitionError('missing limit'), False),
+    (wrapped(httpx.ConnectError('synthetic')), True),
+    (wrapped(wrapped(httpx.ReadTimeout('synthetic'))), True),
+    (wrapped(ValueError('invalid settings')), False),
+])
+def test_prefect_retry_check_returns_a_boolean(error, expected):
+    """Classification answers yes or no without returning or raising an error."""
+    assert module.is_retryable_prefect_error(error) is expected
+
+
+def test_self_referencing_prefect_error_is_not_retryable():
+    """A malformed cause must not leave classification looping forever."""
+    error = ConcurrencySlotAcquisitionError('synthetic')
+    error.__cause__ = error
+    assert module.is_retryable_prefect_error(error) is False

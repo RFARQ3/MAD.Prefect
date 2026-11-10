@@ -24,20 +24,48 @@ from prefect.settings import PREFECT_API_URL
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 
-def _transient_error(error: Exception) -> Exception | None:
-    """Find a temporary Prefect failure without treating configuration errors as retryable."""
-    # Prefect wraps transport errors during slot acquisition. Missing limits use
-    # the same wrapper but must fail immediately, so inspect only explicit causes.
+def is_retryable_prefect_error(error: Exception) -> bool:
+    """Check whether a failed request to Prefect is worth retrying.
+
+    Return True for network failures, timeouts, invalid HTTP responses,
+    or HTTP status 500, 502, 503 or 504. These failures may be temporary.
+
+    Return False for other errors, including missing limits, invalid settings
+    and authentication failures.
+
+    Inspect the original cause when Prefect wraps an error during rate-limit
+    acquisition. This function only checks the error; it does not retry anything
+    or handle requests to the downstream API.
+    """
+    # Prefect wraps both connection failures and missing-limit errors.
+    # Inspect the original cause to distinguish between them. Repeating this
+    # also handles nested wrappers without treating the wrapper as the cause.
     while isinstance(error, ConcurrencySlotAcquisitionError):
-        cause = error.__cause__
-        if not isinstance(cause, Exception) or cause is error:
-            return None
-        error = cause
-    if isinstance(error, (NetworkError, TimeoutException, RemoteProtocolError)):
-        return error
-    if isinstance(error, HTTPStatusError) and error.response.status_code in (500, 502, 503, 504):
-        return error
-    return None
+        original_error = error.__cause__
+
+        if not isinstance(original_error, Exception):
+            return False
+
+        if original_error is error:
+            return False
+
+        error = original_error
+
+    # These failures may resolve when we contact Prefect again.
+    temporary_connection_errors = (
+        NetworkError,
+        TimeoutException,
+        RemoteProtocolError,
+    )
+    if isinstance(error, temporary_connection_errors):
+        return True
+
+    # Only these server responses qualify for another attempt.
+    if isinstance(error, HTTPStatusError):
+        retryable_status_codes = (500, 502, 503, 504)
+        return error.response.status_code in retryable_status_codes
+
+    return False
 
 
 class ApiRateLimit(BaseModel):
@@ -59,7 +87,7 @@ class ApiRateLimit(BaseModel):
     retry_delay_seconds: float = Field(default=1, gt=0, allow_inf_nan=False)
     max_retry_delay_seconds: float = Field(default=10, gt=0, allow_inf_nan=False)
 
-    _ready: bool = PrivateAttr(default=False)
+    _configuration_checked: bool = PrivateAttr(default=False)
     _setup_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
 
     async def acquire(self) -> None:
@@ -77,32 +105,39 @@ class ApiRateLimit(BaseModel):
         except MissingContextError:
             logger = logging.getLogger(__name__)
 
-        delay = min(self.retry_delay_seconds, self.max_retry_delay_seconds)
+        retry_delay_seconds = min(self.retry_delay_seconds, self.max_retry_delay_seconds)
         attempt = 0
         try:
             # One deadline covers setup, all attempts, backoff and slot waiting.
             async with asyncio.timeout(self.wait_timeout_seconds):
                 for attempt in range(1, self.max_attempts + 1):
                     try:
-                        await self._acquire_once()
+                        await self._acquire_prefect_allowance()
                     except Exception as error:
-                        transient = _transient_error(error)
-                        if transient is None or attempt == self.max_attempts:
+                        # Keep the failure and its cause visible without logging
+                        # exception messages, which can contain URLs or credentials.
+                        error_description = type(error).__name__
+                        if error.__cause__ is not None:
+                            error_description += f" caused by {type(error.__cause__).__name__}"
+
+                        if not is_retryable_prefect_error(error) or attempt == self.max_attempts:
                             logger.error(
                                 "Rate limit %s failed on attempt %d/%d (%s); no request permitted",
                                 self.name, attempt, self.max_attempts,
-                                type(transient if transient is not None else error).__name__,
+                                error_description,
                             )
                             raise
 
                         # Jitter keeps recovering pods from reconnecting together.
-                        wait = random.uniform(delay / 2, delay)
+                        wait_seconds = random.uniform(retry_delay_seconds / 2, retry_delay_seconds)
                         logger.warning(
                             "Rate limit %s attempt %d/%d failed (%s); retrying in %.2fs",
-                            self.name, attempt, self.max_attempts, type(transient).__name__, wait,
+                            self.name, attempt, self.max_attempts, error_description, wait_seconds,
                         )
-                        await asyncio.sleep(wait)
-                        delay = min(delay * 2, self.max_retry_delay_seconds)
+                        await asyncio.sleep(wait_seconds)
+                        retry_delay_seconds = min(
+                            retry_delay_seconds * 2, self.max_retry_delay_seconds
+                        )
                     else:
                         if attempt > 1:
                             logger.info("Rate limit %s recovered on attempt %d/%d",
@@ -113,14 +148,19 @@ class ApiRateLimit(BaseModel):
                          self.name, attempt, self.max_attempts, self.wait_timeout_seconds)
             raise
 
-    async def _acquire_once(self) -> None:
-        """Validate once, then acquire an allowance for every physical request."""
-        if not self._ready:
+    async def _acquire_prefect_allowance(self) -> None:
+        """Check the shared configuration once, then ask Prefect for one allowance.
+
+        Return None only after Prefect grants permission. Raise on failed setup
+        or acquisition so acquire() can apply its retry policy. Concurrent first
+        calls share the setup lock, avoiding duplicate configuration reads.
+        """
+        if not self._configuration_checked:
             # Concurrent callers share setup; failures leave it eligible for retry.
             async with self._setup_lock:
-                if not self._ready:
-                    await self._validate_limit()
-                    self._ready = True
+                if not self._configuration_checked:
+                    await self._create_or_check_prefect_limit()
+                    self._configuration_checked = True
 
         # A successful allowance is consumed, not released. Prefect restores it
         # at the configured rate, which spaces requests across all participating pods.
@@ -129,8 +169,13 @@ class ApiRateLimit(BaseModel):
             timeout_seconds=self.wait_timeout_seconds,
         )
 
-    async def _validate_limit(self) -> None:
-        """Create a missing limit, but never overwrite another deployment's settings."""
+    async def _create_or_check_prefect_limit(self) -> None:
+        """Read the named Prefect limit, creating it if it does not exist.
+
+        Require an active limit with capacity one and the requested decay rate.
+        Return None if those settings match; raise ValueError if they differ.
+        Never change an existing limit because other deployments may be using it.
+        """
         # This client talks to the Prefect server, not the downstream API. Setup
         # happens once per limiter so ordinary requests only acquire an allowance.
         async with get_client() as client:
@@ -188,7 +233,12 @@ class RateLimitedAsyncTransport(AsyncBaseTransport):
         self.transport = transport
 
     async def handle_async_request(self, request: Request) -> Response:
-        """Confirm permission first, then send exactly one HTTP attempt."""
+        """Obtain a Prefect allowance, then return the downstream HTTP response.
+
+        Raise RateLimitAcquisitionError without sending if Prefect acquisition
+        fails. Pass downstream HTTP errors through unchanged so the caller's
+        retry system can handle them. Cancellation stops the operation.
+        """
         try:
             await self.limiter.acquire()
         except Exception as error:

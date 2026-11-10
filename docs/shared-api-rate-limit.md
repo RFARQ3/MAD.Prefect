@@ -89,3 +89,17 @@ Create a fresh instance after configuration or server changes. Changes to an
 active limit are not polled: stop consumers before editing or disabling limits,
 then restart them. A deleted limit still fails strict acquisition; it is not
 silently recreated by a previously initialized instance.
+
+
+## Reading the implementation
+
+`is_retryable_prefect_error()` answers one question with True or False: is this
+failure worth retrying when contacting Prefect? It checks exception types and
+HTTP status codes, including an explicitly wrapped cause. It does not create
+errors, perform retries or classify downstream API failures.
+
+`acquire()` performs those Prefect retries and enforces their total deadline.
+`_acquire_prefect_allowance()` checks configuration on the first call, then asks
+for one allowance. `_create_or_check_prefect_limit()` creates a missing limit or
+checks the existing settings without overwriting them. The transport sends the
+downstream request only after acquisition succeeds.
