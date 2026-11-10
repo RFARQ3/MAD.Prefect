@@ -24,50 +24,6 @@ from prefect.settings import PREFECT_API_URL
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 
-def is_retryable_prefect_error(error: Exception) -> bool:
-    """Check whether a failed request to Prefect is worth retrying.
-
-    Return True for network failures, timeouts, invalid HTTP responses,
-    or HTTP status 500, 502, 503 or 504. These failures may be temporary.
-
-    Return False for other errors, including missing limits, invalid settings
-    and authentication failures.
-
-    Inspect the original cause when Prefect wraps an error during rate-limit
-    acquisition. This function only checks the error; it does not retry anything
-    or handle requests to the downstream API.
-    """
-    # Prefect wraps both connection failures and missing-limit errors.
-    # Inspect the original cause to distinguish between them. Repeating this
-    # also handles nested wrappers without treating the wrapper as the cause.
-    while isinstance(error, ConcurrencySlotAcquisitionError):
-        original_error = error.__cause__
-
-        if not isinstance(original_error, Exception):
-            return False
-
-        if original_error is error:
-            return False
-
-        error = original_error
-
-    # These failures may resolve when we contact Prefect again.
-    temporary_connection_errors = (
-        NetworkError,
-        TimeoutException,
-        RemoteProtocolError,
-    )
-    if isinstance(error, temporary_connection_errors):
-        return True
-
-    # Only these server responses qualify for another attempt.
-    if isinstance(error, HTTPStatusError):
-        retryable_status_codes = (500, 502, 503, 504)
-        return error.response.status_code in retryable_status_codes
-
-    return False
-
-
 class ApiRateLimit(BaseModel):
     """Share request spacing between processes using the same Prefect server.
 
@@ -210,15 +166,6 @@ class ApiRateLimit(BaseModel):
                 raise ValueError(f"Prefect rate limit {self.name!r} has incompatible settings")
 
 
-class RateLimitAcquisitionError(RuntimeError):
-    """Prefect could not confirm an allowance; no provider request was sent.
-
-    This is deliberately not an HTTPX network error. HTTP retry libraries must
-    not mistake a Prefect outage for a failed provider request and multiply the
-    limiter's bounded retries. The original exception remains available as cause.
-    """
-
-
 class RateLimitedAsyncTransport(AsyncBaseTransport):
     """Acquire an allowance immediately before the wrapped transport sends.
 
@@ -253,3 +200,56 @@ class RateLimitedAsyncTransport(AsyncBaseTransport):
     async def aclose(self) -> None:
         """Release the network resources when the HTTP client closes."""
         await self.transport.aclose()
+
+
+def is_retryable_prefect_error(error: Exception) -> bool:
+    """Check whether a failed request to Prefect is worth retrying.
+
+    Return True for network failures, timeouts, invalid HTTP responses,
+    or HTTP status 500, 502, 503 or 504. These failures may be temporary.
+
+    Return False for other errors, including missing limits, invalid settings
+    and authentication failures.
+
+    Inspect the original cause when Prefect wraps an error during rate-limit
+    acquisition. This function only checks the error; it does not retry anything
+    or handle requests to the downstream API.
+    """
+    # Prefect wraps both connection failures and missing-limit errors.
+    # Inspect the original cause to distinguish between them. Repeating this
+    # also handles nested wrappers without treating the wrapper as the cause.
+    while isinstance(error, ConcurrencySlotAcquisitionError):
+        original_error = error.__cause__
+
+        if not isinstance(original_error, Exception):
+            return False
+
+        if original_error is error:
+            return False
+
+        error = original_error
+
+    # These failures may resolve when we contact Prefect again.
+    temporary_connection_errors = (
+        NetworkError,
+        TimeoutException,
+        RemoteProtocolError,
+    )
+    if isinstance(error, temporary_connection_errors):
+        return True
+
+    # Only these server responses qualify for another attempt.
+    if isinstance(error, HTTPStatusError):
+        retryable_status_codes = (500, 502, 503, 504)
+        return error.response.status_code in retryable_status_codes
+
+    return False
+
+
+class RateLimitAcquisitionError(RuntimeError):
+    """Prefect could not confirm an allowance; no provider request was sent.
+
+    This is deliberately not an HTTPX network error. HTTP retry libraries must
+    not mistake a Prefect outage for a failed provider request and multiply the
+    limiter's bounded retries. The original exception remains available as cause.
+    """
