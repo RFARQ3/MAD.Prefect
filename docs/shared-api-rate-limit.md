@@ -1,105 +1,87 @@
 # Shared API rate limits
 
 ```python
-import httpx
 from mad_prefect.rate_limit import ApiRateLimit
 
-limit = ApiRateLimit(name="example-account", requests_per_second=2 / 3)
-async with httpx.AsyncClient() as client:
-    await limit.acquire()
-    response = await client.get("https://api.example.com/users")
+limiter = ApiRateLimit(name="knowbe4-account", requests_per_minute=40)
+await limiter.acquire()
+# Send one API request here.
 ```
 
-MAD.Prefect shares request spacing across Kubernetes pods without choosing an HTTP
-retry system. For HTTPX, use [the transport adapter and retry examples](http-retries.md)
-to acquire automatically before each attempt. The manual form above is useful for
-other clients.
+Supply a name for the account's shared allowance and its requests per minute as
+an integer. `40` means requests are spaced about 1.5 seconds apart, across all
+participating processes. It does not allow an immediate burst of 40 requests.
+The implementation converts the rate to the per-second value Prefect expects.
 
-Call `acquire()` immediately before **every physical HTTP attempt**, including
-retries. HTTPX still sends the request. Prefect grants the shared allowance.
-Use the same non-secret name for every deployment using one provider account.
-All participating Kubernetes pods must use the same persistent Prefect server.
-Different Prefect servers do not share an allowance, even with identical names.
+The name identifies the **API account's allowance**, not a process or deployment.
+All callers sharing that allowance must use the same name, rate and Prefect server.
+If one caller specifies 40 and another specifies 50 under the same name, the
+second caller fails when checking the existing limit. It never overwrites it.
+Different Prefect servers do not coordinate, even with matching names.
 
-The first caller creates an active global concurrency limit with capacity one.
-Its slot decays at `requests_per_second`; capacity one avoids an initial burst.
-Creation races are safe. The first acquisition validates configuration; later calls reuse that validation.
-Reuse the same limiter instance across requests. Concurrent callers share one setup
-lock, and unsuccessful setup is never cached.
-An inactive or differently configured limit fails instead of being overwritten.
-Missing server configuration, server errors and timeouts prevent the HTTP attempt.
-`wait_timeout_seconds` bounds configuration checks and acquisition together.
+For HTTPX, use [the transport adapter](http-retries.md) so every actual attempt,
+including retries, acquires an allowance automatically. Other clients can call
+`acquire()` immediately before each attempt. The caller chooses its HTTP retry
+library and handles provider cooldowns such as Retry-After.
 
-The feature requires Prefect 3.2.13 or later (within this package's supported
-Prefect range). Existing MAD.Prefect functionality remains available with older
-Prefect versions; do not import this module there.
+## Prefect connection recovery
 
-Administrators must not delete, disable or edit the limit while consumers run:
-configuration checking and acquisition are separate server operations. Coordinate
-rate changes across deployments while stopped. Pacing is not a daily quota counter,
-a concurrency cap on in-flight HTTP requests, or a shared provider cooldown.
-The caller owns HTTP retries and Retry-After handling. Other integrations that
-do not use this limit still consume the provider's allowance.
+Most callers only need the two arguments above. To change the number of attempts
+to contact Prefect, use `max_attempts=3`. The default is four total attempts,
+including the first. This setting never retries a downstream API request.
+
+Temporary network failures, HTTP timeouts, protocol errors and HTTP
+500/502/503/504 responses can be retried. Missing limits, incompatible settings,
+authentication errors and cancellation stop the operation. Retry delays start at
+one second, double up to ten seconds and include jitter to spread reconnecting pods.
+These delay settings are internal rather than part of the constructor.
+
+Prefect's HTTP client has its own connection/request timeouts. In the inspected
+Prefect 3.2.15 source, the default HTTP request timeout is 60 seconds. This is not
+a deadline for the whole acquire operation: Prefect may retry individual requests.
+
+Waiting for an occupied allowance is different. Prefect's acquisition service
+can repeat HTTP 423 responses without a time limit by default. MAD.Prefect passes
+an internal 120-second allowance-wait limit so that condition eventually fails.
+Downstream developers do not configure it. There is no additional overall timeout
+around setup and recovery. If acquisition fails, no downstream request is sent.
+
+Retries, recovery and exhaustion are logged through the Prefect run logger, or
+Python logging outside a run. Logs include the limit name and error types, not
+URLs, credentials or exception messages. No per-request Prefect tasks are created.
+
+## Setup and reuse
+
+Reuse the limiter instance across requests. On the first call it creates a missing
+limit with capacity one, or checks an existing limit. Successful setup is cached;
+later calls only acquire allowances. A lock prevents simultaneous first calls
+from repeating setup. This is ordinary Python state, with no Pydantic model,
+Field declarations or PrivateAttr bookkeeping in the limiter.
+
+Stop consumers before changing the rate or server, then create fresh instances.
+The instance does not poll for changes or recheck settings after successful setup.
+A deleted limit fails strict acquisition rather than being silently recreated.
+The feature requires Prefect 3.2.13 or later within this package's supported range.
+
+## Updating an earlier feature-branch consumer
+
+Replace `requests_per_second` with integer `requests_per_minute` (multiply the
+old rate by 60). Remove `wait_timeout_seconds`, `retry_delay_seconds` and
+`max_retry_delay_seconds` arguments. `max_attempts` remains optional.
+Use the provider's documented allowance, allowing headroom for other integrations.
 
 ## Progress
 
-Shared limiter and bounded recovery implemented. Synthetic tests cover wrapped connection failures, recovery logging, capped backoff, exhaustion, cancellation, configuration errors and the total deadline.
+Plain Python limiter, minute-based input, cached setup and Prefect recovery are
+implemented. KnowBe4 uses 40 requests per minute. Tests use synthetic data.
 
 ## Next Steps
 
-Review the KnowBe4 consumer demonstration before merging and releasing.
+Review the feature branches before release and authorized production rollout.
 
 ## Blockers & Risks
 
-Production validation requires separately authorized access. No live customer
-systems are needed for unit tests or the local synthetic demonstration.
-
-## Recovery from temporary Prefect failures
-
-`acquire()` retries network failures, HTTP transport timeouts, remote protocol
-errors and HTTP 500/502/503/504 responses, including transport errors explicitly
-wrapped by Prefect's `ConcurrencySlotAcquisitionError`. Missing limits without a
-transport cause, invalid settings, authentication failures and cancellation are
-not retried. Setup failures retry validation; after successful validation, acquisition retries
-only request an allowance and do not reread configuration.
-
-Defaults are four total attempts, a one-second initial backoff and a ten-second
-backoff cap. Backoff doubles and is jittered between half and all of that delay.
-Configure `max_attempts`, `retry_delay_seconds` and `max_retry_delay_seconds` on
-`ApiRateLimit`. `wait_timeout_seconds` remains one total deadline including all
-attempts, configuration checks, sleeps and time waiting for an allowance.
-
-Warnings record the limit name, attempt, error class and next delay; an INFO
-message records recovery and an ERROR records exhaustion or timeout. In a Prefect
-run these use its run logger; outside runs they use the module's Python logger.
-Exception text, request URLs, response bodies and credentials are not logged by
-this retry mechanism. No additional Prefect tasks are created.
-
-A lost response can mean the server granted an allowance that the caller never
-received. Retrying can consume another allowance, reducing throughput, but never
-permits an unconfirmed downstream request. Persistent server outages still fail
-within the configured budget. This does not retry or change provider HTTP calls.
-
-## Setup cache lifetime
-
-Validation is cached per instance, not per process or account. After setup, the
-normal path makes one Prefect slot-acquisition request per physical HTTP attempt;
-Prefect may make additional requests while waiting for capacity or recovering.
-Create a fresh instance after configuration or server changes. Changes to an
-active limit are not polled: stop consumers before editing or disabling limits,
-then restart them. A deleted limit still fails strict acquisition; it is not
-silently recreated by a previously initialized instance.
-
-
-## Reading the implementation
-
-`is_retryable_prefect_error()` answers one question with True or False: is this
-failure worth retrying when contacting Prefect? It checks exception types and
-HTTP status codes, including an explicitly wrapped cause. It does not create
-errors, perform retries or classify downstream API failures.
-
-`acquire()` performs those Prefect retries and enforces their total deadline.
-`_acquire_prefect_allowance()` checks configuration on the first call, then asks
-for one allowance. `_create_or_check_prefect_limit()` creates a missing limit or
-checks the existing settings without overwriting them. The transport sends the
-downstream request only after acquisition succeeds.
+This is request spacing, not a daily quota counter, in-flight concurrency limit
+or account-wide cooldown. Integrations that do not use this limiter still consume
+the provider's quota. A lost allowance response can consume another allowance
+when retried, reducing throughput without permitting an unconfirmed API request.

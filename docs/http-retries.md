@@ -4,7 +4,7 @@
 import httpx
 from mad_prefect.rate_limit import ApiRateLimit, RateLimitedAsyncTransport
 
-limit = ApiRateLimit(name="provider-account", requests_per_second=2 / 3)
+limit = ApiRateLimit(name="provider-account", requests_per_minute=40)
 network = httpx.AsyncHTTPTransport(retries=0)
 paced = RateLimitedAsyncTransport(limit, network)
 

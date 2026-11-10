@@ -21,10 +21,9 @@ from prefect.concurrency._asyncio import ConcurrencySlotAcquisitionError
 from prefect.exceptions import MissingContextError, ObjectNotFound
 from prefect.logging import get_run_logger
 from prefect.settings import PREFECT_API_URL
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 
-class ApiRateLimit(BaseModel):
+class ApiRateLimit:
     """Share request spacing between processes using the same Prefect server.
 
     Use one non-secret name per provider account and reuse this instance across
@@ -32,25 +31,31 @@ class ApiRateLimit(BaseModel):
     for a new allowance. HTTP retries and provider cooldowns belong to the caller.
     """
 
-    model_config = ConfigDict(frozen=True)
+    def __init__(self, name: str, requests_per_minute: int, *, max_attempts: int = 4) -> None:
+        """Set the account's shared rate and the maximum Prefect connection attempts.
 
-    name: str = Field(min_length=1, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
-    requests_per_second: float = Field(gt=0, allow_inf_nan=False)
-    wait_timeout_seconds: float = Field(default=120, gt=0, allow_inf_nan=False)
+        For example, requests_per_minute=40 spaces requests about 1.5 seconds
+        apart across all callers using this name on the same Prefect server.
+        max_attempts includes the first attempt and affects only Prefect calls.
+        """
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
 
-    # These retries contact Prefect only. They never resend a provider request.
-    max_attempts: int = Field(default=4, ge=1, le=100)
-    retry_delay_seconds: float = Field(default=1, gt=0, allow_inf_nan=False)
-    max_retry_delay_seconds: float = Field(default=10, gt=0, allow_inf_nan=False)
+        self.name = name
+        self.requests_per_minute = requests_per_minute
+        self.max_attempts = max_attempts
 
-    _configuration_checked: bool = PrivateAttr(default=False)
-    _setup_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
+        # Reuse successful setup. The lock stops concurrent first requests from
+        # checking or creating the same limit more than once in this instance.
+        self._configuration_checked = False
+        self._setup_lock = asyncio.Lock()
 
     async def acquire(self) -> None:
         """Wait for one confirmed allowance, or fail without permitting a request.
 
-        Temporary Prefect failures retry within one bounded deadline. No Prefect
-        task is created, and callers do not need to release a decaying allowance.
+        Temporary connection failures retry up to max_attempts, using Prefect's
+        HTTP timeouts. Waiting for a busy allowance has a separate internal limit.
+        No Prefect task is created and no allowance needs to be released.
         """
         if not PREFECT_API_URL.value():
             raise RuntimeError("Shared API rate limits require a configured PREFECT_API_URL")
@@ -61,48 +66,37 @@ class ApiRateLimit(BaseModel):
         except MissingContextError:
             logger = logging.getLogger(__name__)
 
-        retry_delay_seconds = min(self.retry_delay_seconds, self.max_retry_delay_seconds)
-        attempt = 0
-        try:
-            # One deadline covers setup, all attempts, backoff and slot waiting.
-            async with asyncio.timeout(self.wait_timeout_seconds):
-                for attempt in range(1, self.max_attempts + 1):
-                    try:
-                        await self._acquire_prefect_allowance()
-                    except Exception as error:
-                        # Keep the failure and its cause visible without logging
-                        # exception messages, which can contain URLs or credentials.
-                        error_description = type(error).__name__
-                        if error.__cause__ is not None:
-                            error_description += f" caused by {type(error.__cause__).__name__}"
+        retry_delay_seconds = 1.0
+        for attempt in range(1, self.max_attempts + 1):
+            try:
+                await self._acquire_prefect_allowance()
+            except Exception as error:
+                # Log error types, not messages that might contain credentials.
+                error_description = type(error).__name__
+                if error.__cause__ is not None:
+                    error_description += f" caused by {type(error.__cause__).__name__}"
 
-                        if not is_retryable_prefect_error(error) or attempt == self.max_attempts:
-                            logger.error(
-                                "Rate limit %s failed on attempt %d/%d (%s); no request permitted",
-                                self.name, attempt, self.max_attempts,
-                                error_description,
-                            )
-                            raise
+                if not is_retryable_prefect_error(error) or attempt == self.max_attempts:
+                    logger.error(
+                        "Rate limit %s failed on attempt %d/%d (%s); no request permitted",
+                        self.name, attempt, self.max_attempts, error_description,
+                    )
+                    raise
 
-                        # Jitter keeps recovering pods from reconnecting together.
-                        wait_seconds = random.uniform(retry_delay_seconds / 2, retry_delay_seconds)
-                        logger.warning(
-                            "Rate limit %s attempt %d/%d failed (%s); retrying in %.2fs",
-                            self.name, attempt, self.max_attempts, error_description, wait_seconds,
-                        )
-                        await asyncio.sleep(wait_seconds)
-                        retry_delay_seconds = min(
-                            retry_delay_seconds * 2, self.max_retry_delay_seconds
-                        )
-                    else:
-                        if attempt > 1:
-                            logger.info("Rate limit %s recovered on attempt %d/%d",
-                                        self.name, attempt, self.max_attempts)
-                        return
-        except TimeoutError:
-            logger.error("Rate limit %s timed out on attempt %d/%d within %.2fs; no request permitted",
-                         self.name, attempt, self.max_attempts, self.wait_timeout_seconds)
-            raise
+                # Spread out reconnecting pods. Backoff starts at one second,
+                # doubles after each failure and stops growing at ten seconds.
+                wait_seconds = random.uniform(retry_delay_seconds / 2, retry_delay_seconds)
+                logger.warning(
+                    "Rate limit %s attempt %d/%d failed (%s); retrying in %.2fs",
+                    self.name, attempt, self.max_attempts, error_description, wait_seconds,
+                )
+                await asyncio.sleep(wait_seconds)
+                retry_delay_seconds = min(retry_delay_seconds * 2, 10)
+            else:
+                if attempt > 1:
+                    logger.info("Rate limit %s recovered on attempt %d/%d",
+                                self.name, attempt, self.max_attempts)
+                return
 
     async def _acquire_prefect_allowance(self) -> None:
         """Check the shared configuration once, then ask Prefect for one allowance.
@@ -122,7 +116,7 @@ class ApiRateLimit(BaseModel):
         # at the configured rate, which spaces requests across all participating pods.
         await rate_limit(
             self.name, occupy=1, strict=True,
-            timeout_seconds=self.wait_timeout_seconds,
+            timeout_seconds=_PREFECT_ALLOWANCE_WAIT_SECONDS,
         )
 
     async def _create_or_check_prefect_limit(self) -> None:
@@ -146,7 +140,7 @@ class ApiRateLimit(BaseModel):
                             name=self.name,
                             limit=1,
                             active=True,
-                            slot_decay_per_second=self.requests_per_second,
+                            slot_decay_per_second=self.requests_per_minute / 60,
                         )
                     )
                 except HTTPStatusError as error:
@@ -155,12 +149,13 @@ class ApiRateLimit(BaseModel):
                         raise
                 limit = await client.read_global_concurrency_limit_by_name(self.name)
 
-            # Never let one deployment silently change another deployment's quota.
+            # The same account name must mean the same rate in every deployment.
+            # Fail on a mismatch instead of overwriting another caller's settings.
             if (
                 not limit.active
                 or limit.limit != 1
                 or not math.isclose(
-                    limit.slot_decay_per_second, self.requests_per_second, rel_tol=1e-6
+                    limit.slot_decay_per_second, self.requests_per_minute / 60, rel_tol=1e-6
                 )
             ):
                 raise ValueError(f"Prefect rate limit {self.name!r} has incompatible settings")
@@ -200,6 +195,12 @@ class RateLimitedAsyncTransport(AsyncBaseTransport):
     async def aclose(self) -> None:
         """Release the network resources when the HTTP client closes."""
         await self.transport.aclose()
+
+
+# Prefect's HTTP timeout handles unreachable servers. Its allowance service can
+# otherwise repeat HTTP 423 responses forever while a limit is busy. Bound that
+# wait internally so downstream developers only need to specify their API quota.
+_PREFECT_ALLOWANCE_WAIT_SECONDS = 120
 
 
 def is_retryable_prefect_error(error: Exception) -> bool:

@@ -28,7 +28,7 @@ async def test_connection_recovers_and_logs_without_exception_payload(backend, m
     else:
         acquire.side_effect = [wrapped(error), None]
     with caplog.at_level(logging.INFO):
-        rate = ApiRateLimit(name='test-account', requests_per_second=2 / 3)
+        rate = ApiRateLimit(name='test-account', requests_per_minute=40)
         await rate.acquire()
     assert sleep.await_count == 1
     assert 0.5 <= sleep.call_args.args[0] <= 1
@@ -47,12 +47,12 @@ async def test_exhaustion_is_bounded_and_backoff_is_capped(backend, monkeypatch,
     monkeypatch.setattr(module.asyncio, 'sleep', sleep)
     monkeypatch.setattr(module.random, 'uniform', lambda low, high: high)
     with pytest.raises(ConcurrencySlotAcquisitionError) as raised:
-        await ApiRateLimit(name='test-account', requests_per_second=2 / 3,
-                           max_attempts=5, max_retry_delay_seconds=3).acquire()
+        await ApiRateLimit(name='test-account', requests_per_minute=40,
+                           max_attempts=6).acquire()
     assert raised.value is error
-    assert acquire.await_count == 5
-    assert [call.args[0] for call in sleep.call_args_list] == [1, 2, 3, 3]
-    assert 'attempt 5/5' in caplog.text
+    assert acquire.await_count == 6
+    assert [call.args[0] for call in sleep.call_args_list] == [1, 2, 4, 8, 10]
+    assert 'attempt 6/6' in caplog.text
     assert 'no request permitted' in caplog.text
 
 
@@ -63,7 +63,7 @@ async def test_only_selected_server_errors_retry(backend, monkeypatch, status):
     error = httpx.HTTPStatusError('sensitive', request=response.request, response=response)
     acquire.side_effect = [wrapped(error), None]
     monkeypatch.setattr(module.asyncio, 'sleep', AsyncMock())
-    rate = ApiRateLimit(name='test-account', requests_per_second=2 / 3)
+    rate = ApiRateLimit(name='test-account', requests_per_minute=40)
     if status >= 500:
         await rate.acquire()
         assert acquire.await_count == 2
@@ -77,25 +77,27 @@ async def test_missing_limit_wrapper_is_not_retried(backend):
     _client, acquire = backend
     acquire.side_effect = ConcurrencySlotAcquisitionError('missing limit')
     with pytest.raises(ConcurrencySlotAcquisitionError):
-        await ApiRateLimit(name='test-account', requests_per_second=2 / 3).acquire()
+        await ApiRateLimit(name='test-account', requests_per_minute=40).acquire()
     assert acquire.await_count == 1
 
 
-async def test_deadline_includes_backoff(backend, caplog):
+async def test_prefect_connection_timeouts_stop_after_max_attempts(backend, monkeypatch):
+    """Prefect's HTTP timeout becomes a failure, then retries remain bounded."""
     _client, acquire = backend
-    acquire.side_effect = wrapped(httpx.ConnectError('unavailable'))
-    with pytest.raises(TimeoutError):
-        await ApiRateLimit(name='test-account', requests_per_second=2 / 3,
-                           wait_timeout_seconds=0.01).acquire()
-    assert acquire.await_count == 1
-    assert 'timed out' in caplog.text
+    acquire.side_effect = wrapped(httpx.ReadTimeout('synthetic Prefect timeout'))
+    monkeypatch.setattr(module.asyncio, 'sleep', AsyncMock())
+
+    with pytest.raises(ConcurrencySlotAcquisitionError):
+        await ApiRateLimit(name='test-account', requests_per_minute=40, max_attempts=3).acquire()
+
+    assert acquire.await_count == 3
 
 
 async def test_cancellation_is_not_retried(backend):
     _client, acquire = backend
     acquire.side_effect = asyncio.CancelledError()
     with pytest.raises(asyncio.CancelledError):
-        await ApiRateLimit(name='test-account', requests_per_second=2 / 3).acquire()
+        await ApiRateLimit(name='test-account', requests_per_minute=40).acquire()
     assert acquire.await_count == 1
 
 
@@ -105,7 +107,7 @@ async def test_logs_use_prefect_run_logger_when_available(backend, monkeypatch):
     logger = Mock()
     monkeypatch.setattr(module, 'get_run_logger', lambda: logger)
     monkeypatch.setattr(module.asyncio, 'sleep', AsyncMock())
-    await ApiRateLimit(name='test-account', requests_per_second=2 / 3).acquire()
+    await ApiRateLimit(name='test-account', requests_per_minute=40).acquire()
     logger.warning.assert_called_once()
     logger.info.assert_called_once()
     logger.error.assert_not_called()

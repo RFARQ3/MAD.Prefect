@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from prefect.exceptions import ObjectNotFound
-from pydantic import ValidationError
 
 import mad_prefect.rate_limit as module
 from mad_prefect.rate_limit import ApiRateLimit
@@ -26,7 +25,7 @@ def backend(monkeypatch):
 
 
 def limiter(**kwargs):
-    return ApiRateLimit(name="test-account", requests_per_second=2 / 3, **kwargs)
+    return ApiRateLimit(name="test-account", requests_per_minute=40, **kwargs)
 
 
 async def test_existing_limit_is_checked_once_per_instance(backend):
@@ -88,19 +87,6 @@ async def test_creation_failure_is_not_mistaken_for_a_race(backend):
     acquire.assert_not_called()
 
 
-@pytest.mark.parametrize("phase", ["setup", "acquisition"])
-async def test_timeout_bounds_all_server_work(backend, phase):
-    client, acquire = backend
-    async def blocked(*args, **kwargs):
-        await asyncio.Event().wait()
-    if phase == "setup":
-        client.read_global_concurrency_limit_by_name.side_effect = blocked
-    else:
-        acquire.side_effect = blocked
-    with pytest.raises(TimeoutError):
-        await limiter(wait_timeout_seconds=0.01).acquire()
-
-
 async def test_requires_shared_server(backend, monkeypatch):
     client, acquire = backend
     monkeypatch.setattr(module, "PREFECT_API_URL", SimpleNamespace(value=lambda: None))
@@ -108,18 +94,6 @@ async def test_requires_shared_server(backend, monkeypatch):
         await limiter().acquire()
     client.read_global_concurrency_limit_by_name.assert_not_called()
     acquire.assert_not_called()
-
-
-@pytest.mark.parametrize("rate", [0, -1, float("inf"), float("nan")])
-def test_invalid_rates_rejected(rate):
-    with pytest.raises(ValidationError):
-        ApiRateLimit(name="account", requests_per_second=rate)
-
-
-@pytest.mark.parametrize("name", ["", " ", "account/key"])
-def test_invalid_names_rejected(name):
-    with pytest.raises(ValidationError):
-        ApiRateLimit(name=name, requests_per_second=1)
 
 
 async def test_concurrent_first_calls_share_validation(backend):
@@ -176,3 +150,15 @@ async def test_instances_validate_independently(backend):
     await limiter().acquire()
     assert client.read_global_concurrency_limit_by_name.await_count == 2
     assert acquire.await_count == 2
+
+
+async def test_same_name_with_a_different_rate_fails_without_overwriting(backend):
+    """A second caller cannot silently change the shared account's rate."""
+    client, acquire = backend
+    await ApiRateLimit(name="test-account", requests_per_minute=40).acquire()
+
+    with pytest.raises(ValueError, match="incompatible"):
+        await ApiRateLimit(name="test-account", requests_per_minute=50).acquire()
+
+    acquire.assert_awaited_once()
+    client.update_global_concurrency_limit.assert_not_called()
