@@ -33,6 +33,8 @@ class ApiRateLimit:
 
     name: str
     requests_per_minute: int
+    # Total attempts to obtain an allowance from Prefect after temporary failures.
+    # Includes the first attempt; does not retry downstream API requests.
     max_attempts: int
 
     _configuration_checked: bool
