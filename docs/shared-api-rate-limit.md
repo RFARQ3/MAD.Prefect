@@ -85,3 +85,15 @@ This is request spacing, not a daily quota counter, in-flight concurrency limit
 or account-wide cooldown. Integrations that do not use this limiter still consume
 the provider's quota. A lost allowance response can consume another allowance
 when retried, reducing throughput without permitting an unconfirmed API request.
+
+
+## Reading acquisition and retries separately
+
+`ApiRateLimit.acquire()` in `rate_limit.py` checks setup and obtains an allowance.
+Its `@retry_prefect_acquisition` decorator, defined in `prefect_retries.py`, handles
+retry decisions, attempts, delays and logging. The constructor and downstream
+usage are unchanged. The decorator uses `max_attempts` from the limiter instance.
+
+`is_retryable_prefect_error()` lives with the decorator and returns a boolean.
+Neither function creates a Prefect task or retries a provider API request.
+Each call has its own retry counter, including concurrent calls on one limiter.

@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, Mock
 import httpx
 import pytest
 
-import mad_prefect.rate_limit as module
+import mad_prefect.prefect_retries as module
 from mad_prefect.rate_limit import ApiRateLimit
 from prefect.concurrency._asyncio import ConcurrencySlotAcquisitionError
 from test_rate_limit import backend
@@ -133,3 +133,28 @@ def test_self_referencing_prefect_error_is_not_retryable():
     error = ConcurrencySlotAcquisitionError('synthetic')
     error.__cause__ = error
     assert module.is_retryable_prefect_error(error) is False
+
+
+async def test_decorated_acquire_preserves_name_and_docstring():
+    """Introspection and documentation still describe the acquisition method."""
+    assert ApiRateLimit.acquire.__name__ == 'acquire'
+    assert 'ask Prefect for one rate-limit allowance' in (ApiRateLimit.acquire.__doc__ or '')
+
+
+async def test_concurrent_acquisitions_have_independent_retry_attempts(backend, monkeypatch):
+    """Concurrent calls each get their own attempt budget, not a shared counter."""
+    _client, acquire = backend
+    attempts_by_task = {}
+
+    async def fail_once_per_task(*args, **kwargs):
+        current = asyncio.current_task()
+        attempts_by_task[current] = attempts_by_task.get(current, 0) + 1
+        if attempts_by_task[current] == 1:
+            raise wrapped(httpx.ConnectError('synthetic'))
+
+    acquire.side_effect = fail_once_per_task
+    monkeypatch.setattr(module.asyncio, 'sleep', AsyncMock())
+    limiter = ApiRateLimit(name='test-account', requests_per_minute=40, max_attempts=2)
+    await asyncio.gather(limiter.acquire(), limiter.acquire())
+
+    assert sorted(attempts_by_task.values()) == [2, 2]
