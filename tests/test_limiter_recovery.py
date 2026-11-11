@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, Mock
 import httpx
 import pytest
 
-import mad_prefect.prefect_retries as module
+import mad_prefect.rate_limit as module
 from mad_prefect.rate_limit import ApiRateLimit
 from prefect.concurrency._asyncio import ConcurrencySlotAcquisitionError
 from test_rate_limit import backend

@@ -7,7 +7,6 @@ import pytest
 from prefect.exceptions import ObjectNotFound
 
 import mad_prefect.rate_limit as module
-import mad_prefect.prefect_retries as retry_module
 from mad_prefect.rate_limit import ApiRateLimit
 
 
@@ -137,7 +136,7 @@ async def test_acquisition_retries_do_not_repeat_successful_setup(backend, monke
     error = ConcurrencySlotAcquisitionError('synthetic')
     error.__cause__ = httpx.ConnectError('synthetic')
     acquire.side_effect = [error, None, None]
-    monkeypatch.setattr(retry_module.asyncio, 'sleep', AsyncMock())
+    monkeypatch.setattr(module.asyncio, 'sleep', AsyncMock())
     rate = limiter()
     await rate.acquire()
     await rate.acquire()
