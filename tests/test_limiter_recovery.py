@@ -135,12 +135,6 @@ def test_self_referencing_prefect_error_is_not_retryable():
     assert module.is_retryable_prefect_error(error) is False
 
 
-async def test_decorated_acquire_preserves_name_and_docstring():
-    """Introspection and documentation still describe the acquisition method."""
-    assert ApiRateLimit.acquire.__name__ == 'acquire'
-    assert 'ask Prefect for one rate-limit allowance' in (ApiRateLimit.acquire.__doc__ or '')
-
-
 async def test_concurrent_acquisitions_have_independent_retry_attempts(backend, monkeypatch):
     """Concurrent calls each get their own attempt budget, not a shared counter."""
     _client, acquire = backend

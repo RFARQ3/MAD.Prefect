@@ -90,11 +90,11 @@ when retried, reducing throughput without permitting an unconfirmed API request.
 ## Reading acquisition and retries separately
 
 `ApiRateLimit.acquire()` in `rate_limit.py` checks setup and obtains an allowance.
-The `retry_prefect_acquisition` decorator handles retry decisions, attempts,
-delays and logging. It is defined above `ApiRateLimit` in the same file so the
-`acquire` method can use `@retry_prefect_acquisition` directly. The decorator
-uses `max_attempts` from the limiter instance.
+The `acquire_with_prefect_retries` helper at the bottom of the same file handles
+retry decisions, attempts, delays and logging. The public `acquire()` method
+calls it directly. Each attempt calls `_acquire_once()` to check setup and ask
+Prefect for an allowance. The helper uses `max_attempts` from the limiter instance.
 
-`is_retryable_prefect_error()` lives with the decorator and returns a boolean.
+`is_retryable_prefect_error()` lives below the retry helper and returns a boolean.
 Neither function creates a Prefect task or retries a provider API request.
 Each call has its own retry counter, including concurrent calls on one limiter.
