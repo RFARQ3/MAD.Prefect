@@ -31,6 +31,13 @@ class ApiRateLimit:
     for a new allowance. HTTP retries and provider cooldowns belong to the caller.
     """
 
+    name: str
+    requests_per_minute: int
+    max_attempts: int
+
+    _configuration_checked: bool
+    _setup_lock: asyncio.Lock
+
     def __init__(self, name: str, requests_per_minute: int, *, max_attempts: int = 4) -> None:
         """Set the account's shared rate and the maximum Prefect connection attempts.
 
