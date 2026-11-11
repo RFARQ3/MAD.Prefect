@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from functools import wraps
-from typing import TypeVar, cast
+from typing import Any
 import math
 
 from httpx import (
@@ -26,6 +26,64 @@ from prefect.concurrency._asyncio import ConcurrencySlotAcquisitionError
 from prefect.exceptions import MissingContextError, ObjectNotFound
 from prefect.logging import get_run_logger
 from prefect.settings import PREFECT_API_URL
+
+
+def retry_prefect_acquisition(
+    acquire: Callable[[ApiRateLimit], Awaitable[None]],
+) -> Callable[[ApiRateLimit], Coroutine[Any, Any, None]]:
+    """Retry the decorated allowance-acquisition method after temporary failures.
+
+    Use the limiter's max_attempts, including the first call. Wait between
+    retries with increasing jittered delays, and log failure, recovery or
+    exhaustion. Raise the original error when retrying cannot help or attempts
+    run out. Cancellation propagates immediately.
+
+    This decorator creates no Prefect task and never retries downstream API
+    requests. Attempt counters and delays belong to each individual call.
+    """
+    @wraps(acquire)
+    async def acquire_with_retries(limiter: ApiRateLimit) -> None:
+        """Call the acquisition method again only after a retryable Prefect failure."""
+        # Attach recovery messages to the flow when available. Standalone callers
+        # still get the same messages through normal Python logging.
+        try:
+            logger = get_run_logger()
+        except MissingContextError:
+            logger = logging.getLogger(__name__)
+
+        retry_delay_seconds = 1.0
+        for attempt in range(1, limiter.max_attempts + 1):
+            try:
+                await acquire(limiter)
+            except Exception as error:
+                # Log error types, not messages that might contain credentials.
+                error_description = type(error).__name__
+                if error.__cause__ is not None:
+                    error_description += f" caused by {type(error.__cause__).__name__}"
+
+                if not is_retryable_prefect_error(error) or attempt == limiter.max_attempts:
+                    logger.error(
+                        "Rate limit %s failed on attempt %d/%d (%s); no request permitted",
+                        limiter.name, attempt, limiter.max_attempts, error_description,
+                    )
+                    raise
+
+                # Spread out reconnecting pods. Backoff starts at one second,
+                # doubles after each failure and stops growing at ten seconds.
+                wait_seconds = random.uniform(retry_delay_seconds / 2, retry_delay_seconds)
+                logger.warning(
+                    "Rate limit %s attempt %d/%d failed (%s); retrying in %.2fs",
+                    limiter.name, attempt, limiter.max_attempts, error_description, wait_seconds,
+                )
+                await asyncio.sleep(wait_seconds)
+                retry_delay_seconds = min(retry_delay_seconds * 2, 10)
+            else:
+                if attempt > 1:
+                    logger.info("Rate limit %s recovered on attempt %d/%d",
+                                limiter.name, attempt, limiter.max_attempts)
+                return
+
+    return acquire_with_retries
 
 
 class ApiRateLimit:
@@ -64,6 +122,7 @@ class ApiRateLimit:
         self._configuration_checked = False
         self._setup_lock = asyncio.Lock()
 
+    @retry_prefect_acquisition
     async def acquire(self) -> None:
         """Check setup once, then ask Prefect for one rate-limit allowance.
 
@@ -181,66 +240,6 @@ class RateLimitAcquisitionError(RuntimeError):
     """
 
 
-# Preserve the decorated method's exact signature for callers and type checkers.
-_AcquisitionMethod = TypeVar("_AcquisitionMethod", bound=Callable[[ApiRateLimit], Awaitable[None]])
-
-
-def retry_prefect_acquisition(acquire: _AcquisitionMethod) -> _AcquisitionMethod:
-    """Retry the decorated allowance-acquisition method after temporary failures.
-
-    Use the limiter's max_attempts, including the first call. Wait between
-    retries with increasing jittered delays, and log failure, recovery or
-    exhaustion. Raise the original error when retrying cannot help or attempts
-    run out. Cancellation propagates immediately.
-
-    This decorator creates no Prefect task and never retries downstream API
-    requests. Attempt counters and delays belong to each individual call.
-    """
-    @wraps(acquire)
-    async def acquire_with_retries(limiter: ApiRateLimit) -> None:
-        """Call the acquisition method again only after a retryable Prefect failure."""
-        # Attach recovery messages to the flow when available. Standalone callers
-        # still get the same messages through normal Python logging.
-        try:
-            logger = get_run_logger()
-        except MissingContextError:
-            logger = logging.getLogger(__name__)
-
-        retry_delay_seconds = 1.0
-        for attempt in range(1, limiter.max_attempts + 1):
-            try:
-                await acquire(limiter)
-            except Exception as error:
-                # Log error types, not messages that might contain credentials.
-                error_description = type(error).__name__
-                if error.__cause__ is not None:
-                    error_description += f" caused by {type(error.__cause__).__name__}"
-
-                if not is_retryable_prefect_error(error) or attempt == limiter.max_attempts:
-                    logger.error(
-                        "Rate limit %s failed on attempt %d/%d (%s); no request permitted",
-                        limiter.name, attempt, limiter.max_attempts, error_description,
-                    )
-                    raise
-
-                # Spread out reconnecting pods. Backoff starts at one second,
-                # doubles after each failure and stops growing at ten seconds.
-                wait_seconds = random.uniform(retry_delay_seconds / 2, retry_delay_seconds)
-                logger.warning(
-                    "Rate limit %s attempt %d/%d failed (%s); retrying in %.2fs",
-                    limiter.name, attempt, limiter.max_attempts, error_description, wait_seconds,
-                )
-                await asyncio.sleep(wait_seconds)
-                retry_delay_seconds = min(retry_delay_seconds * 2, 10)
-            else:
-                if attempt > 1:
-                    logger.info("Rate limit %s recovered on attempt %d/%d",
-                                limiter.name, attempt, limiter.max_attempts)
-                return
-
-    return cast(_AcquisitionMethod, acquire_with_retries)
-
-
 def is_retryable_prefect_error(error: Exception) -> bool:
     """Check whether a failed request to Prefect is worth retrying.
 
@@ -283,7 +282,3 @@ def is_retryable_prefect_error(error: Exception) -> bool:
         return error.response.status_code in retryable_status_codes
 
     return False
-
-
-# Apply the decorator here so the public classes can stay above their helpers.
-ApiRateLimit.acquire = retry_prefect_acquisition(ApiRateLimit.acquire)
