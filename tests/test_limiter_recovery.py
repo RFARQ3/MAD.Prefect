@@ -53,7 +53,6 @@ async def test_exhaustion_is_bounded_and_backoff_is_capped(backend, monkeypatch,
     assert acquire.await_count == 6
     assert [call.args[0] for call in sleep.call_args_list] == [1, 2, 4, 8, 10]
     assert 'attempt 6/6' in caplog.text
-    assert 'no request permitted' in caplog.text
 
 
 @pytest.mark.parametrize('status', [401, 403, 404, 422, 429, 500, 502, 503, 504])

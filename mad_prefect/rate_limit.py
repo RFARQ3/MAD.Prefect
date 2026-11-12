@@ -6,6 +6,7 @@ import asyncio
 import logging
 import random
 import math
+from collections.abc import Awaitable, Callable
 
 from httpx import (
     AsyncBaseTransport,
@@ -64,29 +65,38 @@ class ApiRateLimit:
     async def acquire(self) -> None:
         """Check setup once, then ask Prefect for one rate-limit allowance.
 
-        Return only when Prefect grants permission. The retry helper handles
-        temporary failures, retry delays and logging using max_attempts.
-        No Prefect task is created and no allowance needs to be released.
+        The local operation contains the acquisition steps. The explicit retry
+        call below runs those steps and handles temporary failures using
+        max_attempts. Successful setup remains cached between attempts.
+
+        Return only when Prefect grants permission. No Prefect task is created
+        and no allowance needs to be released. Cancellation stops immediately.
         """
-        await acquire_with_prefect_retries(self)
 
-    async def _acquire_once(self) -> None:
-        """Check setup and request one allowance; let the caller handle failures."""
-        if not PREFECT_API_URL.value():
-            raise RuntimeError("Shared API rate limits require a configured PREFECT_API_URL")
+        async def obtain_allowance() -> None:
+            """Check setup and request one allowance."""
+            if not PREFECT_API_URL.value():
+                raise RuntimeError("Shared API rate limits require a configured PREFECT_API_URL")
 
-        if not self._configuration_checked:
-            # Concurrent callers share setup; failures leave it eligible for retry.
-            async with self._setup_lock:
-                if not self._configuration_checked:
-                    await self._create_or_check_prefect_limit()
-                    self._configuration_checked = True
+            if not self._configuration_checked:
+                # Concurrent callers share setup; failures leave it eligible for retry.
+                async with self._setup_lock:
+                    if not self._configuration_checked:
+                        await self._create_or_check_prefect_limit()
+                        self._configuration_checked = True
 
-        # A successful allowance is consumed, not released. Prefect restores it
-        # at the configured rate, which spaces requests across all participating pods.
-        await rate_limit(
-            self.name, occupy=1, strict=True,
-            timeout_seconds=_PREFECT_ALLOWANCE_WAIT_SECONDS,
+            # A successful allowance is consumed, not released. Prefect restores it
+            # at the configured rate, which spaces requests across all participating pods.
+            await rate_limit(
+                self.name, occupy=1, strict=True,
+                timeout_seconds=_PREFECT_ALLOWANCE_WAIT_SECONDS,
+            )
+
+        await retry(
+            obtain_allowance,
+            max_attempts=self.max_attempts,
+            should_retry=is_retryable_prefect_error,
+            description=f"Rate limit {self.name}",
         )
 
     async def _create_or_check_prefect_limit(self) -> None:
@@ -182,17 +192,27 @@ class RateLimitAcquisitionError(RuntimeError):
     """
 
 
-async def acquire_with_prefect_retries(limiter: ApiRateLimit) -> None:
-    """Obtain one allowance, retrying temporary Prefect failures up to max_attempts.
+async def retry(
+    operation: Callable[[], Awaitable[None]],
+    *,
+    max_attempts: int,
+    should_retry: Callable[[Exception], bool],
+    description: str,
+) -> None:
+    """Run an operation, retrying eligible failures up to max_attempts.
 
     Count the first call as an attempt. Between retries, wait with increasing
     jittered delays and log the failure. Log recovery or exhaustion as well.
     Raise the original error if it is not retryable or all attempts fail.
     Cancellation stops immediately.
 
-    Each call has its own attempt counter. This helper creates no Prefect task
-    and never retries requests to the downstream API.
+    The caller supplies the operation and decides which failures are retryable.
+    This function does not inspect a limiter, obtain allowances or send requests.
+    Each call has its own retry counter, including concurrent calls.
     """
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
+
     # Attach recovery messages to the flow when available. Standalone callers
     # still get the same messages through normal Python logging.
     try:
@@ -201,35 +221,35 @@ async def acquire_with_prefect_retries(limiter: ApiRateLimit) -> None:
         logger = logging.getLogger(__name__)
 
     retry_delay_seconds = 1.0
-    for attempt in range(1, limiter.max_attempts + 1):
+    for attempt in range(1, max_attempts + 1):
         try:
-            await limiter._acquire_once()
+            await operation()
         except Exception as error:
             # Log error types, not messages that might contain credentials.
             error_description = type(error).__name__
             if error.__cause__ is not None:
                 error_description += f" caused by {type(error.__cause__).__name__}"
 
-            if not is_retryable_prefect_error(error) or attempt == limiter.max_attempts:
+            if not should_retry(error) or attempt == max_attempts:
                 logger.error(
-                    "Rate limit %s failed on attempt %d/%d (%s); no request permitted",
-                    limiter.name, attempt, limiter.max_attempts, error_description,
+                    "%s failed on attempt %d/%d (%s)",
+                    description, attempt, max_attempts, error_description,
                 )
                 raise
 
-            # Spread out reconnecting pods. Backoff starts at one second,
+            # Spread out reconnecting callers. Backoff starts at one second,
             # doubles after each failure and stops growing at ten seconds.
             wait_seconds = random.uniform(retry_delay_seconds / 2, retry_delay_seconds)
             logger.warning(
-                "Rate limit %s attempt %d/%d failed (%s); retrying in %.2fs",
-                limiter.name, attempt, limiter.max_attempts, error_description, wait_seconds,
+                "%s attempt %d/%d failed (%s); retrying in %.2fs",
+                description, attempt, max_attempts, error_description, wait_seconds,
             )
             await asyncio.sleep(wait_seconds)
             retry_delay_seconds = min(retry_delay_seconds * 2, 10)
         else:
             if attempt > 1:
-                logger.info("Rate limit %s recovered on attempt %d/%d",
-                            limiter.name, attempt, limiter.max_attempts)
+                logger.info("%s recovered on attempt %d/%d",
+                            description, attempt, max_attempts)
             return
 
 
