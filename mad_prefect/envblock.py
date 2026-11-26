@@ -1,4 +1,3 @@
-import types
 from typing import (
     Any,
     Dict,
@@ -6,13 +5,9 @@ from typing import (
     ClassVar,
     Optional,
     TypeVar,
-    Union,
-    get_args,
-    get_origin,
 )
 from prefect.blocks.core import Block
 import os
-from pydantic import SecretStr
 from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
 
@@ -34,30 +29,6 @@ class EnvBlock(Block):
         if not model_field.is_required():
             return None
         raise ValueError(f"Environment variable {env_var_name} is required.")
-
-    @staticmethod
-    def unwrap_types(field_type: Any) -> list[type]:
-        origin = get_origin(field_type)
-        args = get_args(field_type)
-
-        if origin in (Union, types.UnionType):
-            return [t for t in args if t is not type(None)]
-        return [field_type]
-
-    @staticmethod
-    def apply_field_type(
-        raw_value: str, field_types: list[type], env_var_name: str
-    ) -> Any:
-        for possible_type in field_types:
-            try:
-                if possible_type == SecretStr:
-                    return SecretStr(raw_value)
-                return possible_type(raw_value)
-            except Exception:
-                continue
-        raise ValueError(
-            f"Error converting {env_var_name} value to any of {field_types}"
-        )
 
     @classmethod
     def resolve_prefix(cls) -> str:
@@ -89,7 +60,7 @@ class EnvBlock(Block):
         Each environment variable must be named `<PREFIX>_<ATTRIBUTE>`, where `PREFIX` is
         either the class-level `prefix` or the subclass name, uppercased.
 
-        Values are cast to the annotated types, including support for `SecretStr`. If a required
+        Pydantic validates and converts supplied strings to the annotated types. If a required
         environment variable is missing and no default is defined in the subclass, a `ValueError`
         is raised. The result is cached and reused on subsequent calls.
 
@@ -149,15 +120,10 @@ class EnvBlock(Block):
                     model_field, env_var_name
                 )
 
-            # Else cast the raw_value to the appropriate type
             else:
-                # Extract the possible field types
-                field_types = cls.unwrap_types(model_field.annotation)
-                field_values[field] = cls.apply_field_type(
-                    raw_value, field_types, env_var_name
-                )
+                field_values[field] = raw_value
 
-        # Instantiate and cache the block
+        # Let Pydantic parse strings, including booleans, unions and secrets.
         instance = cls(**field_values)
         cls._instance = instance
         return instance
